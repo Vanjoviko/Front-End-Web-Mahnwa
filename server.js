@@ -8,6 +8,13 @@ const net = require('node:net');
 const chapterMedia = require('./lib/chapter-media');
 const {comicStorageKey, resolveMediaUrl, saveCover, saveChapterPdf, saveChapterImages, saveDownloadedChapterImages, renderPdfPages, migrateLegacyComicMedia, removeComicStorage, removeChapterStorage} = chapterMedia;
 const {importChapterFromSeries, SourceAccessError} = require('./lib/source-scraper');
+const {createDbWriter} = require('./lib/db-writer');
+const {createWorkerClient} = require('./lib/scan-worker');
+const {createScanService} = require('./lib/scan-service');
+const {createScanHandler} = require('./lib/scan-routes');
+const {scanLimits} = require('./lib/scan-media');
+const {resolveRequestPath} = require('./lib/media-path');
+const {publicCatalog, adminComic, detailForReader, sendJson} = require('./lib/public-catalog');
 
 // Load local server-only settings without exposing credentials to browser code.
 try {
@@ -22,13 +29,27 @@ try {
 }
 
 const ROOT = __dirname;
-const DATA = path.join(ROOT, 'data', 'db.json');
+const DATA = path.join(process.env.LEMBAR_DATA_DIR || path.join(ROOT, 'data'), 'db.json');
 const DATA_DIR = path.dirname(DATA);
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const MAX_BODY = 40_000_000;
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || crypto.randomBytes(18).toString('base64url');
+const dbWriter = createDbWriter(DATA);
+// Konfigurasi scan-import (limit khusus jalur scan; limit unggah manual tidak berubah).
+const envInt = (name, def) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? Math.floor(v) : def; };
+const SCAN_CONFIG = {
+  workerUrl: process.env.SCAN_WORKER_URL || 'http://127.0.0.1:8000',
+  workerToken: process.env.SCAN_WORKER_TOKEN || '',
+  devMode: /^(1|true|yes)$/i.test(process.env.SCAN_DEV_MODE || ''),
+  limits: scanLimits(process.env),
+  minFreeBytes: envInt('SCAN_MIN_FREE_BYTES', 1_073_741_824),
+  pollMs: envInt('SCAN_POLL_MS', 1000),
+  workerUnreachableMs: envInt('SCAN_WORKER_UNREACHABLE_S', 60) * 1000,
+  ingestConcurrency: envInt('SCAN_INGEST_CONCURRENCY', 2),
+  draftExpiryDays: envInt('SCAN_DRAFT_EXPIRY_DAYS', 7)
+};
 const sessions = new Map();
 const loginAttempts = new Map();
 
@@ -55,9 +76,9 @@ const seed = {
   ads:[{id:'ad-home-top',label:'Ruang iklan — beranda',placement:'home-top',enabled:false},{id:'ad-detail',label:'Ruang iklan — detail',placement:'detail',enabled:false}]
 };
 
-async function loadDb(){ try { const db=JSON.parse((await fs.readFile(DATA,'utf8')).replace(/^\uFEFF/,''));db.users||=[];if(!db.comics.some(c=>c.id==='swordmasters-youngest-son'))db.comics.unshift(structuredClone(seed.comics[0]));if(!db.connectors.some(c=>c.id==='demo-source'))db.connectors.push(structuredClone(seed.connectors.find(c=>c.id==='demo-source')));const connector=db.connectors?.find(c=>c.id==='kiryuu');if(connector&&!connector.feedUrl){connector.method='Metadata halaman publik';connector.feedUrl='https://v7.kiryuu.to/manga/swordmasters-youngest-son/';connector.enabled=false;connector.state='nonaktif';connector.message='Metadata saja; chapter hanya dapat dibaca setelah konten tersedia di penyimpanan lokal.';}for(const comic of db.comics||[]){for(const chapter of comic.chapters||[]){delete chapter.url;chapter.pages=(Array.isArray(chapter.pages)?chapter.pages:[]).filter(page=>{const image=typeof page==='string'?page:(page?.image_url||page?.url||'');return typeof image==='string'&&image.startsWith('/media/');});for(const key of ['fileUrl','pdfUrl'])if(chapter[key]&&!String(chapter[key]).startsWith('/media/'))delete chapter[key];}}await saveDb(db);return db; } catch { await fs.mkdir(path.dirname(DATA),{recursive:true}); const initial=structuredClone(seed);initial.users=[];await saveDb(initial);return initial; } }
+async function loadDb(){ try { const db=JSON.parse((await fs.readFile(DATA,'utf8')).replace(/^\uFEFF/,''));db.users||=[];db.scanDrafts||=[];if(!db.comics.some(c=>c.id==='swordmasters-youngest-son'))db.comics.unshift(structuredClone(seed.comics[0]));if(!db.connectors.some(c=>c.id==='demo-source'))db.connectors.push(structuredClone(seed.connectors.find(c=>c.id==='demo-source')));const connector=db.connectors?.find(c=>c.id==='kiryuu');if(connector&&!connector.feedUrl){connector.method='Metadata halaman publik';connector.feedUrl='https://v7.kiryuu.to/manga/swordmasters-youngest-son/';connector.enabled=false;connector.state='nonaktif';connector.message='Metadata saja; chapter hanya dapat dibaca setelah konten tersedia di penyimpanan lokal.';}for(const comic of db.comics||[]){for(const chapter of comic.chapters||[]){delete chapter.url;chapter.pages=(Array.isArray(chapter.pages)?chapter.pages:[]).filter(page=>{const image=typeof page==='string'?page:(page?.image_url||page?.url||'');return typeof image==='string'&&image.startsWith('/media/');});for(const key of ['fileUrl','pdfUrl'])if(chapter[key]&&!String(chapter[key]).startsWith('/media/'))delete chapter[key];}}await saveDb(db);return db; } catch { await fs.mkdir(path.dirname(DATA),{recursive:true}); const initial=structuredClone(seed);initial.users=[];await saveDb(initial);return initial; } }
 let dbPromise = loadDb().then(async db=>{let changed=false;for(const comic of db.comics)if(await migrateLegacyComicMedia(comic))changed=true;if(changed)await saveDb(db);return db;});
-async function saveDb(next){ await fs.mkdir(path.dirname(DATA),{recursive:true}); const tmp=DATA+'.tmp'; await fs.writeFile(tmp,JSON.stringify(next,null,2)); await fs.rename(tmp,DATA); }
+async function saveDb(next){ return dbWriter.save(next); } // antrean tulis serial + tmp unik (NFR-07)
 const chapterJobs=[];
 let chapterWorkerActive=false;
 function enqueueChapterRender(comicId,chapterId){
@@ -118,7 +139,12 @@ dbPromise.then(db=>{
     if(['QUEUED','DOWNLOADING'].includes(chapter.status)&&(chapter.fileUrl||chapter.importMethod==='kiryuu-html'))enqueueChapterRender(comic.id,chapter.id);
   }
 }).catch(error=>console.error('[chapter-worker-startup]',error.message));
-const json=(res,status,obj)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(obj));};
+const json=(res,status,obj)=>sendJson(res,status,obj);
+const scanWorker=createWorkerClient({baseUrl:SCAN_CONFIG.workerUrl,token:SCAN_CONFIG.workerToken});
+const scanService=createScanService({getDb:()=>dbPromise,saveDb,worker:scanWorker,config:SCAN_CONFIG});
+const scanHandler=createScanHandler({service:scanService,config:SCAN_CONFIG,json,readBody:req=>body(req)});
+dbPromise.then(async()=>{await scanService.sweepExpired();await scanService.recover();}).catch(error=>console.error('[scan-startup]',error.message));
+setInterval(()=>scanService.sweepExpired().catch(error=>console.error('[scan-sweep]',error.message)),3_600_000).unref();
 const cookieSession=req=>{const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('lembar_session='))?.slice('lembar_session='.length);const id=raw&&decodeURIComponent(raw);const session=id&&sessions.get(id);if(session&&session.expires>Date.now())return session;if(id)sessions.delete(id);return null;};
 const setSession=(res,sessionId)=>res.setHeader('set-cookie',`lembar_session=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV==='production'?'; Secure':''}`);
 const passwordRecord=async password=>{const salt=crypto.randomBytes(16);const hash=await new Promise((resolve,reject)=>crypto.scrypt(password,salt,64,(e,v)=>e?reject(e):resolve(v)));return `${salt.toString('hex')}:${hash.toString('hex')}`;};
@@ -225,9 +251,11 @@ async function api(req,res,url){const db=await dbPromise;const method=req.method
   if(url.pathname==='/api/auth/me'&&method==='GET'){const session=cookieSession(req);return json(res,200,session?{authenticated:true,role:session.role,username:session.username}:{authenticated:false});}
   const session=cookieSession(req);
   if(url.pathname.startsWith('/api/admin')&&session?.role!=='admin')return json(res,401,{error:'Silakan masuk menggunakan akun admin.'});
-  if(url.pathname==='/api/catalog'&&method==='GET')return json(res,200,{comics:db.comics,announcements:db.announcements,ads:db.ads.filter(a=>a.enabled)});
+  if(url.pathname.startsWith('/api/admin/scan'))return scanHandler(req,res,url);
+  if(url.pathname==='/api/catalog'&&method==='GET')return json(res,200,publicCatalog(db));
+  {const m=method==='GET'&&url.pathname.match(/^\/api\/comics\/([^/]+)\/chapters\/([^/]+)\/pages$/);if(m){let comicId,chapterId;try{comicId=decodeURIComponent(m[1]);chapterId=decodeURIComponent(m[2]);}catch{return json(res,400,{error:'Parameter tidak valid.'});}const comic=db.comics.find(c=>c.id===comicId),chapter=comic?.chapters?.find(c=>c.id===chapterId);if(!chapter)return json(res,404,{error:'Chapter tidak ditemukan.'});return json(res,200,detailForReader(comic,chapter));}}
   if(url.pathname==='/api/connectors'&&method==='GET')return json(res,200,{connectors:db.connectors.map(({id,name,method,enabled,state,message,lastSync,intervalMinutes})=>({id,name,method,enabled,state,message,lastSync,intervalMinutes}))});
-  if(url.pathname==='/api/admin'&&method==='GET')return json(res,200,{connectors:db.connectors,announcements:db.announcements,ads:db.ads,settings:db.settings,comics:db.comics});
+  if(url.pathname==='/api/admin'&&method==='GET')return json(res,200,{connectors:db.connectors,announcements:db.announcements,ads:db.ads,settings:db.settings,comics:db.comics.map(adminComic)});
   if(url.pathname==='/api/admin/comics'&&method==='POST'){try{return json(res,201,await createAdminComic(db,await body(req)));}catch(error){return json(res,error.status||400,{error:error.message||'Komik gagal disimpan.'});}}
   if(url.pathname.startsWith('/api/admin/comics/')&&method==='DELETE'){const id=decodeURIComponent(url.pathname.split('/').pop());const comic=db.comics.find(c=>c.id===id);const mediaRoot=path.resolve(DATA_DIR,'media');if(comic?.storageKey)await removeComicStorage(comic.storageKey);if(comic?.source==='Sumber Demo Lokal'){const target=path.resolve(mediaRoot,id);if(target.startsWith(mediaRoot+path.sep))await fs.rm(target,{recursive:true,force:true});}db.comics=db.comics.filter(c=>c.id!==id);await saveDb(db);return json(res,200,{ok:true});}
   if(url.pathname.startsWith('/api/admin/comics/')&&url.pathname.endsWith('/chapters/scrape')&&method==='POST'){
@@ -246,7 +274,7 @@ async function api(req,res,url){const db=await dbPromise;const method=req.method
     comic.chapters.unshift(chapter);
     await saveDb(db);
     enqueueChapterRender(comic.id,chapter.id);
-    return json(res,202,{message:`Chapter ${number} masuk antrean. Server akan memeriksa robots.txt, mengambil halaman yang diizinkan, lalu menyimpan gambarnya secara lokal.`,comicId:comic.id,chapterId:chapter.id,status:chapter.status});
+    return json(res,202,{message:`Chapter ${number} masuk antrean. Server akan mengambil halaman chapter ini lalu menyimpan gambarnya secara lokal.`,comicId:comic.id,chapterId:chapter.id,status:chapter.status});
   }
   if(url.pathname.startsWith('/api/admin/comics/')&&url.pathname.endsWith('/chapters/images')&&method==='POST'){
     const id=decodeURIComponent(url.pathname.split('/')[4]),comic=db.comics.find(item=>item.id===id);
@@ -283,10 +311,11 @@ async function api(req,res,url){const db=await dbPromise;const method=req.method
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.pdf':'application/pdf'};
 const server=http.createServer(async(req,res)=>{try{
   const u=new URL(req.url,'http://localhost');if(u.pathname.startsWith('/api/'))return await api(req,res,u);
-  const pathname=decodeURIComponent(u.pathname);let file;
-  if(pathname.startsWith('/media/')){file=path.resolve(DATA_DIR,`.${pathname}`);if(!file.startsWith(path.resolve(DATA_DIR,'media')+path.sep))return json(res,403,{error:'Path media tidak diizinkan.'});}
+  const norm=resolveRequestPath(String(req.url).split(/[?#]/)[0]);if(!norm)return json(res,400,{error:'Path tidak valid.'});const pathname=norm.path;let file;
+  if(norm.isDraft&&cookieSession(req)?.role!=='admin')return json(res,401,{error:'Silakan masuk menggunakan akun admin.'});
+  if(norm.isMedia){file=path.resolve(DATA_DIR,`.${pathname}`);if(!file.startsWith(path.resolve(DATA_DIR,'media')+path.sep))return json(res,403,{error:'Path media tidak diizinkan.'});}
   else{const publicPath=pathname==='/'?'/index.html':pathname;file=path.resolve(ROOT,'public',`.${publicPath}`);if(!file.startsWith(path.resolve(ROOT,'public')+path.sep))return json(res,403,{error:'Tidak diizinkan.'});}
-  const data=await fs.readFile(file),type=mime[path.extname(file)]||'application/octet-stream',headers={'content-type':type,'x-content-type-options':'nosniff','cache-control':pathname.startsWith('/media/')?'public, max-age=86400':'no-cache'};if(type==='application/pdf'){headers['accept-ranges']='bytes';headers['content-disposition']='inline';const range=req.headers.range;if(range){const match=range.match(/^bytes=(\d*)-(\d*)$/);if(!match){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null){const suffix=end;start=Math.max(0,data.length-suffix);end=data.length-1;}else if(end===null)end=data.length-1;if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||start>=data.length){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}end=Math.min(end,data.length-1);headers['content-range']=`bytes ${start}-${end}/${data.length}`;headers['content-length']=String(end-start+1);res.writeHead(206,headers);return res.end(req.method==='HEAD'?undefined:data.subarray(start,end+1));}}headers['content-length']=String(data.length);res.writeHead(200,headers);res.end(req.method==='HEAD'?undefined:data);
+  const data=await fs.readFile(file),type=mime[path.extname(file)]||'application/octet-stream',headers={'content-type':type,'x-content-type-options':'nosniff','cache-control':norm.isDraft?'private, no-store':norm.isMedia?'public, max-age=86400':'no-cache'};if(type==='application/pdf'){headers['accept-ranges']='bytes';headers['content-disposition']='inline';const range=req.headers.range;if(range){const match=range.match(/^bytes=(\d*)-(\d*)$/);if(!match){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null){const suffix=end;start=Math.max(0,data.length-suffix);end=data.length-1;}else if(end===null)end=data.length-1;if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||start>=data.length){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}end=Math.min(end,data.length-1);headers['content-range']=`bytes ${start}-${end}/${data.length}`;headers['content-length']=String(end-start+1);res.writeHead(206,headers);return res.end(req.method==='HEAD'?undefined:data.subarray(start,end+1));}}headers['content-length']=String(data.length);res.writeHead(200,headers);res.end(req.method==='HEAD'?undefined:data);
 }catch(e){if(!res.headersSent)json(res,e.code==='ENOENT'?404:500,{error:e.code==='ENOENT'?'File tidak ditemukan.':e.message||'Terjadi kesalahan server.'});}});
 server.listen(PORT,HOST,()=>{console.log(`Lembar siap di http://${HOST}:${PORT}`);if(process.env.ADMIN_PASSWORD)console.log(`Login admin: ${ADMIN_USER} (kata sandi dikonfigurasi melalui environment)`);else console.log(`Login admin sementara: ${ADMIN_USER} / ${ADMIN_PASSWORD} (atur ADMIN_PASSWORD untuk kata sandi tetap)`);});
 
