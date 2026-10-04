@@ -1,0 +1,8 @@
+{
+  "name": "lembar-manwa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Katalog dan pembaca manhwa demo berbahasa Indonesia",
+  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
+  "engines": { "node": ">=20" }
+}

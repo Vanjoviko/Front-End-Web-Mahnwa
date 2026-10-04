@@ -1,0 +1,16 @@
+{
+  "id": "demo-manhwa",
+  "title": "Penjaga Menara Senja",
+  "type": "Manhwa",
+  "cover": "/demo-source/pages/page-001.svg",
+  "status": "Berjalan",
+  "genres": ["Fantasi", "Petualangan"],
+  "year": 2026,
+  "author": "Lembar Studio (demo)",
+  "synopsis": "Nara menjaga mercusuar di atas awan dan mencari sumber cahaya yang hilang. Judul serta halaman ini dibuat khusus sebagai fixture demonstrasi.",
+  "chapters": [
+    { "chapter": "1", "title": "Menara yang Padam", "date": "Demo", "pages": ["/demo-source/pages/page-001.svg", "/demo-source/pages/page-002.svg"] },
+    { "chapter": "2", "title": "Peta Berdebu", "date": "Demo", "pages": ["/demo-source/pages/page-003.svg", "/demo-source/pages/page-004.svg"] },
+    { "chapter": "3", "title": "Cahaya Pertama", "date": "Demo", "pages": ["/demo-source/pages/page-005.svg", "/demo-source/pages/page-006.svg"] }
+  ]
+}
