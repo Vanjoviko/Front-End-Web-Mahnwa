@@ -3,3 +3,8 @@ data/db.json
 data/db.json.tmp
 data/media/
 .env
+.dev-data/
+.fixture-data/
+*.log
+__pycache__/
+.venv/
