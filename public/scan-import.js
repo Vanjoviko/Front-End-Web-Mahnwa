@@ -24,7 +24,7 @@ const ScanImport=(()=>{
   // ---------- tab Scan Import ----------
   function warningsHtml(d){const list=(d.warnings||[]).filter(w=>WARN[w]);return list.length?`<div class="scan-warnings">${list.map(w=>`<p class="warn-line">⚠ ${esc(WARN[w])}</p>`).join('')}</div>`:'';}
   function chapterRows(d){
-    return d.chapters.length?`<div class="table-wrap scan-chapters"><table class="admin-table"><thead><tr><th>Chapter</th><th>Judul</th><th>Tanggal</th><th>Status sumber</th><th>Unduhan</th></tr></thead><tbody>${d.chapters.map(c=>`<tr class="${c.excluded?'row-muted':''}"><td>${c.number===null?'<i>(tanpa nomor)</i>':esc(c.number)}${c.numberRaw&&c.numberRaw!==c.number?`<br><small>${esc(c.numberRaw)}</small>`:''}</td><td>${esc(c.title||'—')}</td><td>${esc(c.date||'—')}</td><td>${c.flag==='EXISTS'?badge('SUDAH ADA',''):badge('BARU','ok')} ${issueBadges(c.issues)}</td><td>${statusBadge(c.status)||'<small>—</small>'}${c.errorMessage?`<br><small class="err-text">${esc(c.errorCode||'')} ${esc(c.errorMessage)}</small>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Tidak ada chapter pada sumber ini.</div>';
+    return d.chapters.length?`<div class="table-wrap scan-chapters"><table class="admin-table"><thead><tr><th>Chapter</th><th>Tanggal</th><th>Status sumber</th><th>Unduhan</th></tr></thead><tbody>${d.chapters.map(c=>`<tr class="${c.excluded?'row-muted':''}"><td>${c.number===null?'<i>(tanpa nomor)</i>':esc(c.number)}${c.numberRaw&&c.numberRaw!==c.number?`<br><small>${esc(c.numberRaw)}</small>`:''}</td><td>${esc(c.date||'—')}</td><td>${c.flag==='EXISTS'?badge('SUDAH ADA',''):badge('BARU','ok')} ${issueBadges(c.issues)}</td><td>${statusBadge(c.status)||'<small>—</small>'}${c.errorMessage?`<br><small class="err-text">${esc(c.errorCode||'')} ${esc(c.errorMessage)}</small>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Tidak ada chapter pada sumber ini.</div>';
   }
   function previewHtml(d){
     const c=d.comic,downloading=d.state==='DOWNLOADING';
@@ -160,7 +160,7 @@ const ScanImport=(()=>{
       <input class="control" id="fin-genres" value="${esc((c.genres||[]).join(', '))}" aria-label="Genre" placeholder="Genre, dipisahkan koma" style="margin-top:8px">
       <p class="form-error" id="fin-error" role="alert"></p>
       <div class="hero-actions" style="margin-top:12px"><button class="btn" id="fin-publish" ${published?'disabled':''}>Publish ke katalog</button><button class="btn ghost" id="fin-save" ${published?'disabled':''}>Simpan perubahan</button><button class="btn danger" id="fin-discard">Buang draft</button><a class="btn ghost" href="#admin/scan">← Scan Import</a></div></div></div>
-      <div class="detail-lower"><section><div class="section-heading"><div><h2>Daftar chapter</h2><p>${d.counts.included} dari ${d.counts.total} chapter akan dipublikasikan. Ubah nomor/judul, keluarkan, atau hapus chapter sebelum publish.</p></div></div>
+      <div class="detail-lower"><section><div class="section-heading"><div><h2>Daftar chapter</h2><p>${d.counts.included} dari ${d.counts.total} chapter akan dipublikasikan. Ubah nomor, keluarkan, atau hapus chapter sebelum publish.</p></div></div>
       <div class="chapter-list fin-chapters">${d.chapters.map(ch=>finalizeRow(ch,published)).join('')||'<div class="empty">Tidak ada chapter.</div>'}</div></section>
       <aside class="side-panel"><h3>Informasi sumber</h3><p class="muted">Adapter: ${esc(d.adapterLabel)}</p><p class="muted" style="word-break:break-all">${esc(d.canonicalUrl)}</p>
       <p class="muted">Selesai diunduh: ${d.counts.completed}/${d.counts.total}${d.counts.failed?` · ${d.counts.failed} gagal`:''}</p>
@@ -170,7 +170,7 @@ const ScanImport=(()=>{
   function finalizeRow(ch,published){
     const bad=ch.excluded?'':(ch.issues.includes('duplicate_number')||ch.issues.includes('number_required')||(ch.status!=='COMPLETED'))?'row-error':'';
     return `<div class="chapter-row fin-row ${ch.excluded?'row-muted':''} ${bad}" data-key="${esc(ch.key)}"><label class="fin-inc"><input type="checkbox" class="fin-include" ${ch.excluded?'':'checked'} ${published?'disabled':''} aria-label="Sertakan chapter"></label>
-      <span class="fin-fields"><input class="control fin-num" value="${esc(ch.number??'')}" placeholder="No." inputmode="decimal" aria-label="Nomor chapter" ${published?'disabled':''}><input class="control fin-ctitle" value="${esc(ch.title||'')}" maxlength="140" placeholder="Judul chapter" aria-label="Judul chapter" ${published?'disabled':''}></span>
+      <span class="fin-fields"><input class="control fin-num" value="${esc(ch.number??'')}" placeholder="No." inputmode="decimal" aria-label="Nomor chapter" ${published?'disabled':''}></span>
       <span class="fin-info"><small>${esc(ch.date||'')}</small> ${ch.flag==='EXISTS'?badge('SUDAH ADA',''):''} ${statusBadge(ch.status)||badge('belum diunduh','warn')} ${ScanFormat.pagesLabel(ch)?`<small>${ScanFormat.pagesLabel(ch)}</small>`:''} ${issueBadges(ch.issues)}${ch.errorMessage?`<br><small class="err-text">${esc(ch.errorCode||'')} ${esc(ch.errorMessage)}</small>`:''}</span>
       <span class="fin-act">${(ch.status===null||ch.status==='FAILED'||ch.status==='CANCELLED')&&!published?`<button class="btn ghost small fin-retry">${ch.status===null?'Unduh':'Coba lagi'}</button>`:''}${published?'':'<button class="btn danger small fin-delete">Hapus</button>'}</span></div>`;
   }
@@ -178,7 +178,7 @@ const ScanImport=(()=>{
     const val=id=>document.getElementById(id).value;
     const year=val('fin-year').trim();
     return {comic:{title:val('fin-title'),alt:val('fin-alt'),synopsis:val('fin-synopsis'),author:val('fin-author'),type:val('fin-type')||null,status:val('fin-status')||null,year:year===''?null:Number(year),genres:val('fin-genres').split(',').map(x=>x.trim()).filter(Boolean)},
-      chapters:[...document.querySelectorAll('.fin-row')].map(r=>({key:r.dataset.key,number:r.querySelector('.fin-num').value.trim(),title:r.querySelector('.fin-ctitle').value,excluded:!r.querySelector('.fin-include').checked}))};
+      chapters:[...document.querySelectorAll('.fin-row')].map(r=>({key:r.dataset.key,number:r.querySelector('.fin-num').value.trim(),title:'',excluded:!r.querySelector('.fin-include').checked}))};
   }
   async function reloadFinalize(id){fin.d=await call(`/api/admin/scan/${encodeURIComponent(id)}`);const root=document.getElementById('fin-root');if(root)root.innerHTML=finalizeHtml(fin.d);}
   function showErr(msg,keys=[]){const el=document.getElementById('fin-error');if(el)el.textContent=msg||'';document.querySelectorAll('.fin-row').forEach(r=>r.classList.toggle('row-error',keys.includes(r.dataset.key)));if(keys.length)document.querySelector(`.fin-row[data-key="${keys[0]}"]`)?.scrollIntoView({block:'center'});}

@@ -5,6 +5,25 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const dns = require('node:dns/promises');
 const net = require('node:net');
+
+// Load local server-only settings without exposing credentials to browser code.
+// WAJIB dijalankan SEBELUM modul lokal di-require: lib/chapter-media.js membaca LEMBAR_DATA_DIR saat
+// modul dimuat, sehingga db.json dan media harus memakai direktori data yang SAMA. Bila .env dimuat
+// belakangan, media ditulis ke <repo>/data/media tetapi dilayani dari <LEMBAR_DATA_DIR>/media -> 404.
+// LEWATI saat LEMBAR_SKIP_ENV=1: dipakai tes agar tidak terpengaruh .env milik developer.
+if (process.env.LEMBAR_SKIP_ENV !== '1') {
+  try {
+    const envFile = fsSync.readFileSync(path.join(__dirname, '.env'), 'utf8');
+    for (const line of envFile.split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z_][A-Za-z\d_]*)\s*=\s*(.*)$/);
+      if (!match || process.env[match[1]] !== undefined) continue;
+      process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2').trim();
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
 const chapterMedia = require('./lib/chapter-media');
 const {comicStorageKey, resolveMediaUrl, saveCover, saveChapterPdf, saveChapterImages, saveDownloadedChapterImages, renderPdfPages, migrateLegacyComicMedia, removeComicStorage, removeChapterStorage} = chapterMedia;
 const {importChapterFromSeries, SourceAccessError} = require('./lib/source-scraper');
@@ -15,18 +34,6 @@ const {createScanHandler} = require('./lib/scan-routes');
 const {scanLimits} = require('./lib/scan-media');
 const {resolveRequestPath} = require('./lib/media-path');
 const {publicCatalog, adminComic, detailForReader, sendJson} = require('./lib/public-catalog');
-
-// Load local server-only settings without exposing credentials to browser code.
-try {
-  const envFile = fsSync.readFileSync(path.join(__dirname, '.env'), 'utf8');
-  for (const line of envFile.split(/\r?\n/)) {
-    const match = line.match(/^([A-Za-z_][A-Za-z\d_]*)\s*=\s*(.*)$/);
-    if (!match || process.env[match[1]] !== undefined) continue;
-    process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2').trim();
-  }
-} catch (error) {
-  if (error.code !== 'ENOENT') throw error;
-}
 
 const ROOT = __dirname;
 const DATA = path.join(process.env.LEMBAR_DATA_DIR || path.join(ROOT, 'data'), 'db.json');

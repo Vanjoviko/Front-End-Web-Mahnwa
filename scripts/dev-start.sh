@@ -25,15 +25,33 @@ TOKEN="${WORKER_TOKEN:-dev-token}"
 LOG_DIR="${LOG_DIR:-/tmp/lembar-dev}"; mkdir -p "$LOG_DIR"
 FE_DATA_DIR="${FE_DATA_DIR:-$FE_DIR/.dev-data}"; mkdir -p "$FE_DATA_DIR"
 
-# venv BE (dibuat sekali)
+# Interpreter BE: pakai .venv lokal bila ada, jika tidak fallback ke python3 sistem
+# (mis. WSL/box tanpa python3-venv). Venv hanya dibuat bila keduanya tidak memenuhi.
+BE_DEPS='import fastapi, uvicorn, httpx, pydantic, PIL'
 PY="$BE_DIR/.venv/bin/python"
 if [ ! -x "$PY" ]; then
-  [ "${SKIP_INSTALL:-0}" = "1" ] && { echo "venv BE belum ada ($BE_DIR/.venv) dan SKIP_INSTALL=1" >&2; exit 1; }
-  echo ">> membuat venv BE dan memasang dependensi runtime (sekali saja)"
-  python3 -m venv "$BE_DIR/.venv"
-  "$BE_DIR/.venv/bin/pip" install -q fastapi "uvicorn[standard]" httpx pydantic sqlalchemy pillow
+  if command -v python3 >/dev/null && python3 -c "$BE_DEPS" 2>/dev/null; then
+    PY="$(command -v python3)"
+    echo ">> memakai python3 sistem ($PY); dependensi runtime sudah terpasang"
+  else
+    [ "${SKIP_INSTALL:-0}" = "1" ] && { echo "venv BE belum ada ($BE_DIR/.venv) dan python3 sistem tidak punya dependensi; SKIP_INSTALL=1" >&2; exit 1; }
+    echo ">> membuat venv BE dan memasang dependensi runtime (sekali saja)"
+    if ! python3 -m venv "$BE_DIR/.venv" 2>/dev/null; then
+      echo "GAGAL membuat venv (modul python3-venv/ensurepip tidak tersedia)." >&2
+      echo "Pasang paket venv OS (mis. 'sudo apt install python3-venv' atau 'python3.14-venv')," >&2
+      echo "atau pasang dependensi ke python3 sistem lalu jalankan ulang:" >&2
+      echo "  python3 -m pip install --user fastapi 'uvicorn[standard]' httpx pydantic sqlalchemy pillow" >&2
+      exit 1
+    fi
+    "$BE_DIR/.venv/bin/pip" install -q fastapi "uvicorn[standard]" httpx pydantic sqlalchemy pillow
+    PY="$BE_DIR/.venv/bin/python"
+  fi
 fi
-"$PY" -c "import PIL, fastapi, httpx" 2>/dev/null || { [ "${SKIP_INSTALL:-0}" = "1" ] || "$BE_DIR/.venv/bin/pip" install -q fastapi "uvicorn[standard]" httpx pydantic sqlalchemy pillow; }
+"$PY" -c "$BE_DEPS" 2>/dev/null || {
+  echo "Dependensi BE belum lengkap untuk $PY. Pasang lalu jalankan ulang:" >&2
+  echo "  \"$PY\" -m pip install fastapi 'uvicorn[standard]' httpx pydantic sqlalchemy pillow" >&2
+  exit 1
+}
 
 PIDS=()
 cleanup() { trap - EXIT INT TERM; echo; echo ">> menghentikan layanan"; for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
@@ -51,8 +69,8 @@ wait_http "http://127.0.0.1:$FIXTURE_PORT/menara-biru/manifest.json" "sumber fix
 
 echo ">> worker Python :$WORKER_PORT"
 ( cd "$BE_DIR" && SCAN_DEV_MODE=true WORKER_TOKEN="$TOKEN" WORKER_PORT="$WORKER_PORT" WORKER_BIND=127.0.0.1 \
-    PUBLIC_BASE_URL="http://127.0.0.1:$WORKER_PORT" SCAN_ALLOWED_HOSTS="127.0.0.1:$FIXTURE_PORT" \
-    SCAN_HOST_MIN_DELAY_MS="${HOST_MIN_DELAY_MS:-0}" exec "$PY" -m app ) >"$LOG_DIR/worker.log" 2>&1 &
+    PUBLIC_BASE_URL="http://127.0.0.1:$WORKER_PORT" SCAN_HOST_MIN_DELAY_MS="${HOST_MIN_DELAY_MS:-0}" \
+    SCAN_MIN_FREE_DISK_BYTES="${SCAN_MIN_FREE_DISK_BYTES:-1}" exec "$PY" -m app ) >"$LOG_DIR/worker.log" 2>&1 &
 PIDS+=($!)
 wait_http "http://127.0.0.1:$WORKER_PORT/health" "worker"
 

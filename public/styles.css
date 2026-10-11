@@ -40,7 +40,7 @@
 .fin-synopsis{width:100%;margin-top:10px;resize:vertical}
 .cover-pick{margin-top:10px;display:inline-flex;cursor:pointer}
 .fin-row{display:grid;grid-template-columns:28px minmax(280px,1fr) minmax(220px,1fr) 150px;gap:12px;align-items:center}
-.fin-fields{display:grid;grid-template-columns:90px 1fr;gap:8px}
+.fin-fields{display:grid;grid-template-columns:90px;gap:8px}
 .fin-fields .control{padding:6px 9px}
 .fin-act{display:flex;gap:6px;justify-content:flex-end}
 @media(max-width:900px){.scan-preview{grid-template-columns:1fr}.scan-cover{width:130px}.progress-row{grid-template-columns:90px 1fr 60px}.progress-row .pr-status,.progress-row .pr-act{grid-column:1 / -1}.fin-row{grid-template-columns:28px 1fr}.fin-info,.fin-act{grid-column:2}}
@@ -55,4 +55,4 @@
 #fin-root .detail-copy input.control:not([type=number]),#fin-root .detail-copy textarea.control,#fin-root .detail-copy select.control{max-width:100%}
 #fin-root .fin-facts{flex-wrap:wrap}
 #fin-root .hero-actions{flex-wrap:wrap}
-@media(max-width:560px){#fin-root .detail-hero{grid-template-columns:1fr;justify-items:start}#fin-root .detail-hero .detail-cover{width:120px}#fin-root .fin-fields{grid-template-columns:72px minmax(0,1fr)}#fin-root .fin-row{grid-template-columns:24px minmax(0,1fr)}#fin-root .chapter-list{min-width:0}}
+@media(max-width:560px){#fin-root .detail-hero{grid-template-columns:1fr;justify-items:start}#fin-root .detail-hero .detail-cover{width:120px}#fin-root .fin-fields{grid-template-columns:72px}#fin-root .fin-row{grid-template-columns:24px minmax(0,1fr)}#fin-root .chapter-list{min-width:0}}

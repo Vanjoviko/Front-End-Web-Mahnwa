@@ -311,3 +311,40 @@ test('QA D-03: respons scan memuat chaptersTotal/sourceCanonicalUrl/coverPreview
     assert.equal((await s.request('GET', d.comic.coverPreviewUrl)).status, 404);
   } finally { await s.stop(); await w.close(); }
 });
+
+// Regresi kritis (dilaporkan pengguna): setelah scan + unduh + publish, komik muncul di katalog tetapi
+// sampul tidak tertampil dan gambar chapter gagal dimuat (404). Akar masalah: server.js meng-require
+// lib/chapter-media SEBELUM memuat .env, sehingga MEDIA_ROOT tetap <repo>/data/media sementara endpoint
+// /media/... dilayani dari <LEMBAR_DATA_DIR>/media (dari .env) -> berkas tidak pernah ketemu.
+test('regresi: LEMBAR_DATA_DIR dari .env dipakai untuk db.json DAN media -> sampul & halaman scan terlayani', async () => {
+  const {startServerFromEnvFile} = require('./helpers/server-env-file');
+  const w = await startFakeWorker();
+  w.setScan(URL1, scanResult({url: URL1, numbers: [2, 1], title: 'Seri Env Uji'}));
+  const s = await startServerFromEnvFile({env: {SCAN_WORKER_URL: w.url, SCAN_WORKER_TOKEN: w.token, SCAN_DEV_MODE: 'true', SCAN_POLL_MS: '30', SCAN_MIN_FREE_BYTES: '1'}});
+  try {
+    await s.login();
+    const scan = await s.request('POST', '/api/admin/scan', {url: URL1});
+    assert.equal(scan.status, 201, JSON.stringify(scan.json));
+    const id = scan.json.draftId;
+    assert.equal((await s.request('POST', `/api/admin/scan/${id}/download`, {})).status, 202);
+    await until(async () => (await s.request('GET', `/api/admin/scan/${id}/progress`)).json.state === 'READY');
+    assert.equal((await s.request('POST', `/api/admin/scan/${id}/publish`, {})).status, 201);
+    const cat = await fetch(s.base + '/api/catalog').then(r => r.json());
+    const comic = cat.comics.find(c => c.title === 'Seri Env Uji');
+    assert.ok(comic, 'komik hasil scan muncul di katalog publik');
+    // 1) Sampul hasil publish harus benar-benar terunduh dari /media (dulu 404 -> ikon rusak).
+    assert.ok(comic.cover.startsWith('/media/'), comic.cover);
+    const cover = await fetch(s.base + comic.cover);
+    assert.equal(cover.status, 200, `sampul ${comic.cover} -> ${cover.status}`);
+    assert.match(cover.headers.get('content-type'), /^image\//);
+    // 2) Halaman chapter harus terunduh dari /media (dulu 404 -> gambar gagal dimuat).
+    const pages = await fetch(`${s.base}/api/comics/${comic.id}/chapters/${comic.chapters[0].id}/pages`).then(r => r.json());
+    assert.ok(pages.pages.length > 0);
+    const img = await fetch(s.base + pages.pages[0].image_url);
+    assert.equal(img.status, 200, `halaman ${pages.pages[0].image_url} -> ${img.status}`);
+    assert.match(img.headers.get('content-type'), /^image\//);
+    // 3) Media ditulis di bawah LEMBAR_DATA_DIR (dari .env), bukan folder data bawaan.
+    assert.ok(fs.existsSync(path.join(s.app, 'dev-data', 'media')), 'media harus di <LEMBAR_DATA_DIR>/media');
+    assert.ok(!fs.existsSync(path.join(s.app, 'data', 'media')), 'tidak boleh menulis ke <repo>/data/media');
+  } finally { await s.stop(); await w.close(); }
+});

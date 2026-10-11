@@ -11,7 +11,7 @@ async function startServer({env = {}, db} = {}) {
   if (db) fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify(db));
   const port = 3200 + Math.floor(Math.random() * 600);
   const child = spawn(process.execPath, [path.join(__dirname, '..', '..', 'server.js')], {
-    env: {...process.env, LEMBAR_DATA_DIR: dir, PORT: String(port), HOST: '127.0.0.1', ADMIN_USER: 'admin', ADMIN_PASSWORD: 'pw-uji-123', ...env}, stdio: ['ignore', 'pipe', 'pipe']
+    env: {...process.env, LEMBAR_DATA_DIR: dir, PORT: String(port), HOST: '127.0.0.1', ADMIN_USER: 'admin', ADMIN_PASSWORD: 'pw-uji-123', LEMBAR_SKIP_ENV: '1', ...env}, stdio: ['ignore', 'pipe', 'pipe']
   });
   let log = '';
   child.stdout.on('data', d => { log += d; }); child.stderr.on('data', d => { log += d; });

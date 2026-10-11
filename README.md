@@ -58,7 +58,7 @@ Alur (Admin → **Scan Import**):
 
 1. Tempel URL sumber lalu **Scan link**. Worker memilih adapter (saat ini: *Manifest JSON* dan *Fixture* lokal untuk pengujian), mengembalikan metadata, sampul, dan daftar chapter. Hasilnya adalah **draft** (`db.scanDrafts`) yang tidak muncul di katalog, konektor, maupun panel admin lama.
 2. Periksa pratinjau (sampul, judul, deskripsi, status, kreator, genre, jumlah chapter, tanda BARU/SUDAH ADA) lalu klik **Download All**. FE meminta worker membuat job; progres per chapter/halaman dipantau dan dapat dibatalkan atau diulang per chapter. Chapter dinyatakan `COMPLETED` hanya jika **semua** halamannya valid (all-or-nothing); gambar dicek ukuran, checksum SHA-256, dan magic byte saat diterima.
-3. Buka **halaman finalisasi** (`#admin/scan/<draftId>`, tata letak sama dengan halaman detail): ubah judul/sinopsis/sampul/nomor & judul chapter, keluarkan atau hapus chapter, lalu **Publish**. Publish bersifat atomik (satu penulisan `db.json`; berkas dipindah dengan rollback bila gagal) dan menyimpan chapter dengan kontrak yang sama dengan unggahan manual: `pages: [{ "page_number": 1, "image_url": "/media/<kunci>/chapters/chapter-<nomor>/001.webp" }]`.
+3. Buka **halaman finalisasi** (`#admin/scan/<draftId>`, tata letak sama dengan halaman detail): ubah judul/sinopsis/sampul/nomor chapter, keluarkan atau hapus chapter, lalu **Publish**. Publish bersifat atomik (satu penulisan `db.json`; berkas dipindah dengan rollback bila gagal) dan menyimpan chapter dengan kontrak yang sama dengan unggahan manual: `pages: [{ "page_number": 1, "image_url": "/media/<kunci>/chapters/chapter-<nomor>/001.webp" }]`.
 4. Scan ulang URL yang sama setelah dipublikasikan hanya menandai chapter baru; publish menambahkan chapter baru tanpa menimpa metadata yang sudah ada. Mengganti chapter yang sudah ada memerlukan konfirmasi eksplisit.
 
 Konfigurasi FE (environment variables; lihat `.env.example`):
@@ -91,13 +91,14 @@ Dua repo terpisah: **Front-End-Web-Mahnwa** (repo ini) dan **Back-End-Web-Mahnwa
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | Alamat dengar. |
 | `NODE_ENV` | — | `production` ⇒ cookie sesi bertanda `Secure` (butuh `localhost`/HTTPS). |
 | `LEMBAR_DATA_DIR` | `./data` | `db.json` dan `media/`. |
+| `LEMBAR_SKIP_ENV` | — | Set `1` untuk melewati pemuatan `.env` (khusus tes; helper tes memakainya agar hasil tidak bergantung `.env` developer). |
 | `SCAN_WORKER_URL` | `http://127.0.0.1:8000` | Alamat worker. |
 | `SCAN_WORKER_TOKEN` | — (wajib) | Harus sama dengan `WORKER_TOKEN` worker. FE tetap start bila kosong/berbeda, tetapi worker menolak (401) dan Scan Import melaporkan `WORKER_UNAVAILABLE` (502). |
 | `SCAN_DEV_MODE` | `false` | Hanya lokal. |
 | `SCAN_MAX_PAGES_PER_CHAPTER` / `SCAN_MAX_BYTES_PER_CHAPTER` / `SCAN_MAX_BYTES_PER_IMAGE` | `300` / `157286400` / `15728640` | Validasi ulang saat ingest. |
 | `SCAN_MIN_FREE_BYTES` / `SCAN_POLL_MS` / `SCAN_WORKER_UNREACHABLE_S` / `SCAN_DRAFT_EXPIRY_DAYS` / `SCAN_INGEST_CONCURRENCY` | `1073741824` / `1000` / `60` / `7` / `2` | Lihat tabel Scan Import di atas (`SCAN_INGEST_CONCURRENCY` = jumlah gambar yang diterima FE paralel). |
 
-Variabel worker (`WORKER_TOKEN`, `WORKER_BIND`, `WORKER_PORT`, `PUBLIC_BASE_URL`, `SCAN_ALLOWED_HOSTS`, …) didokumentasikan lengkap di README repo BE.
+Variabel worker (`WORKER_TOKEN`, `WORKER_BIND`, `WORKER_PORT`, `PUBLIC_BASE_URL`, `SCAN_DEV_MODE`, …) didokumentasikan lengkap di README repo BE (lihat `.env.example`). `python -m app` memuat `Back-End-Web-Mahnwa/.env` otomatis.
 
 ### Hubungan variabel FE ↔ worker
 
@@ -106,8 +107,7 @@ Variabel worker (`WORKER_TOKEN`, `WORKER_BIND`, `WORKER_PORT`, `PUBLIC_BASE_URL`
 | `SCAN_WORKER_URL` (default `http://127.0.0.1:8000`) | `WORKER_BIND` + `WORKER_PORT` (default `127.0.0.1:8000`) | Alamat yang dipakai FE untuk memanggil worker harus menunjuk ke bind/port worker. Satu-satunya alamat worker yang dipakai FE; URL di dalam respons/manifest worker **tidak** diikuti. |
 | `SCAN_WORKER_TOKEN` | `WORKER_TOKEN` | **Harus identik.** Dikirim FE sebagai header `X-Worker-Token`. Worker wajib memilikinya (kecuali `SCAN_DEV_MODE=true`, hanya lokal); FE mengirim apa adanya, jadi nilai kosong/berbeda berujung 401 dari worker. |
 | — | `PUBLIC_BASE_URL` | Basis absolut untuk field `url` di manifest chapter (mis. `http://worker:8000`). Isi sama dengan `SCAN_WORKER_URL` seperti yang terlihat dari klien manifest; kosong = path relatif (`/worker/v1/...`). FE memakai `SCAN_WORKER_URL`, bukan `PUBLIC_BASE_URL`, jadi salah isi `PUBLIC_BASE_URL` tidak memutus FE tetapi membuat `url` di manifest keliru. |
-| `SCAN_DEV_MODE` | `SCAN_DEV_MODE` | Nyalakan di keduanya (hanya lokal) agar `http://` + host loopback/privat yang ada di `SCAN_ALLOWED_HOSTS` diizinkan. |
-| — | `SCAN_ALLOWED_HOSTS` | Sumber yang boleh di-scan (daftar host, koma). Kosong = Scan Import nonaktif. |
+| `SCAN_DEV_MODE` | `SCAN_DEV_MODE` | Nyalakan di keduanya (hanya lokal) agar `http://` + host loopback/privat diizinkan. Worker tidak memakai daftar host (cukup SSRF guard), jadi inilah yang membuka sumber lokal seperti fixture. |
 
 ### Memulai kedua layanan
 
@@ -124,7 +124,7 @@ Login `admin` / `admin-dev` (hanya dev), buka `http://127.0.0.1:3000/#admin` →
 ```bash
 # 1) Worker (repo BE)
 python -m venv .venv && . .venv/bin/activate && pip install fastapi "uvicorn[standard]" httpx pydantic sqlalchemy
-export WORKER_TOKEN="$(openssl rand -hex 24)" SCAN_ALLOWED_HOSTS="sumber.contoh.org" PUBLIC_BASE_URL="http://127.0.0.1:8000"
+export WORKER_TOKEN="$(openssl rand -hex 24)" PUBLIC_BASE_URL="http://127.0.0.1:8000"
 python -m app                                  # 127.0.0.1:8000, cek: curl http://127.0.0.1:8000/health
 
 # 2) FE (repo FE)
