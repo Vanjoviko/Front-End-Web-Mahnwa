@@ -1,10 +1,36 @@
+# --- Node ---
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Env & secrets (jangan pernah commit .env) ---
+.env
+.env.*
+!.env.example
+
+# --- Data runtime & lokal ---
 data/db.json
 data/db.json.tmp
 data/media/
-.env
 .dev-data/
 .fixture-data/
+
+# --- Log ---
 *.log
+
+# --- Coverage / test ---
+coverage/
+.nyc_output/
+
+# --- Python (script bantu di repo ini) ---
 __pycache__/
 .venv/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
