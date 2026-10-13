@@ -1,6 +1,6 @@
 'use strict';
 // Menjalankan server.js dari SALINAN aplikasi sementara dengan konfigurasi HANYA dari berkas .env.
-// Regresi: LEMBAR_DATA_DIR yang ditulis di .env harus dipakai untuk db.json SEKALIGUS media, supaya
+// Regresi: AKUMA_DATA_DIR yang ditulis di .env harus dipakai untuk db.json SEKALIGUS media, supaya
 // berkas yang ditulis (sampul & halaman) benar-benar terlayani lewat endpoint /media.
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
@@ -18,17 +18,17 @@ function copyApp(dest) {
 }
 
 async function startServerFromEnvFile({env = {}, db, dataDir = 'dev-data', envLines = []} = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lembar-env-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'akuma-env-'));
   const app = path.join(dir, 'app');
   copyApp(app);
   if (db) fs.mkdirSync(path.join(app, dataDir), {recursive: true});
   if (db) fs.writeFileSync(path.join(app, dataDir, 'db.json'), JSON.stringify(db));
   // Relatif (seperti .env developer) supaya menguji resolusi cwd yang sama dengan `npm start`.
-  fs.writeFileSync(path.join(app, '.env'), [`LEMBAR_DATA_DIR=${dataDir}`, ...envLines].join('\n') + '\n');
+  fs.writeFileSync(path.join(app, '.env'), [`AKUMA_DATA_DIR=${dataDir}`, ...envLines].join('\n') + '\n');
 
   const port = 3200 + Math.floor(Math.random() * 600);
   const childEnv = {...process.env};
-  delete childEnv.LEMBAR_DATA_DIR; // HANYA boleh datang dari .env
+  delete childEnv.AKUMA_DATA_DIR; // HANYA boleh datang dari .env
   delete childEnv.LEMBAR_SKIP_ENV; // agar .env benar-benar dibaca
   Object.assign(childEnv, {PORT: String(port), HOST: '127.0.0.1', ADMIN_USER: 'admin', ADMIN_PASSWORD: 'pw-uji-123'}, env);
   const child = spawn(process.execPath, [path.join(app, 'server.js')], {cwd: app, env: childEnv, stdio: ['ignore', 'pipe', 'pipe']});
@@ -36,7 +36,7 @@ async function startServerFromEnvFile({env = {}, db, dataDir = 'dev-data', envLi
   child.stdout.on('data', d => { log += d; }); child.stderr.on('data', d => { log += d; });
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('server .env tidak start: ' + log)), 8000);
-    child.stdout.on('data', () => { if (log.includes('Lembar siap')) { clearTimeout(t); resolve(); } });
+    child.stdout.on('data', () => { if (log.includes('Akuma siap')) { clearTimeout(t); resolve(); } });
     child.on('exit', code => { clearTimeout(t); reject(new Error('server .env keluar: ' + code + ' ' + log)); });
   });
   const base = `http://127.0.0.1:${port}`;

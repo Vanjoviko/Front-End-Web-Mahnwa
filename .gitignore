@@ -13,6 +13,9 @@ pnpm-debug.log*
 # --- Data runtime & lokal ---
 data/db.json
 data/db.json.tmp
+data/comments.db
+data/comments.db-wal
+data/comments.db-shm
 data/media/
 .dev-data/
 .fixture-data/

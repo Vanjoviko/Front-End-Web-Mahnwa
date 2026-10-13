@@ -1,4 +1,4 @@
-# Lembar
+# Akuma
 
 Katalog dan pembaca manhwa berbahasa Indonesia. Proyek ini memakai Node.js bawaan (tanpa paket eksternal), HTML, CSS, dan JavaScript. Karya, sampul, metadata, dan halaman baca yang tampil adalah data/placeholder demo.
 
@@ -25,11 +25,11 @@ npm start
 
 ## Fitur
 
-- Beranda dengan pencarian, pilihan editor, pengumuman, rekomendasi, update, genre, dan slot iklan berlabel.
+- Home dengan pencarian, pilihan editor, pengumuman, rekomendasi, update, genre, dan slot iklan berlabel.
 - Katalog dengan filter judul/genre, jenis, status, genre, dan pengurutan update/popularitas.
 - Detail komik dan daftar chapter; reader demo responsif dengan chapter sebelumnya/berikutnya.
-- Akun pembaca dapat mendaftar dan login; favorit dan riwayat baca tetap disimpan di browser.
-- Login admin khusus mengelola komik, chapter, pengumuman, slot iklan, jadwal, dan konektor. Password pembaca disimpan sebagai hash scrypt di `data/db.json`.
+- Akun pembaca login lewat layanan backend (kata sandi akun lama Akuma, atau Google/Discord/X). Favorit dan riwayat baca masih disimpan di browser.
+- Login admin khusus mengelola komik, chapter, pengumuman, slot iklan, jadwal, dan konektor. Login admin tetap lokal di FE dan terpisah dari akun pembaca.
 - Form admin menerima sampul PNG/JPEG/WebP dan chapter PDF (maksimum 5 MB per sampul, 20 MB per PDF). Server menyimpan PDF asli dan mengantrekannya untuk dirender menjadi gambar halaman bernomor; reader menampilkan halaman hasil konversi dan tautan untuk mengunduh PDF asli. Status `QUEUED`, `DOWNLOADING`, `COMPLETED`, atau `FAILED` dicatat per chapter; reader memeriksa status proses secara otomatis. Rendering membutuhkan `pdfinfo` dan `pdftoppm` (Poppler) di `PATH`; maksimum 80 halaman dirender per chapter.
 - Tab Kelola chapter menerima unggahan 1–80 gambar JPG/PNG/WebP per chapter, total maksimal 28 MB. Admin memilih nomor chapter; urutan pilihan file menjadi urutan halaman reader. Gambar langsung disimpan lokal sebagai `001`, `002`, dan seterusnya tanpa dependensi scraping atau PDF.
 - Berkas unggahan baru disimpan terstruktur di `data/media/<slug-komik-id>/cover.*` dan `data/media/<slug-komik-id>/chapters/chapter-<nomor>/` (`original.pdf`, `001.jpg`, `002.jpg`, dan seterusnya). Saat server pertama kali dijalankan setelah pembaruan, aset unggahan lama di `data/media/uploads/` disalin ke struktur ini dan tautan di database diperbarui; berkas lama dibiarkan sebagai cadangan.
@@ -56,7 +56,7 @@ Fitur Scan Import mengimpor satu seri beserta semua chapter-nya dari sumber yang
 
 Alur (Admin → **Scan Import**):
 
-1. Tempel URL sumber lalu **Scan link**. Worker memilih adapter (saat ini: *Manifest JSON* dan *Fixture* lokal untuk pengujian), mengembalikan metadata, sampul, dan daftar chapter. Hasilnya adalah **draft** (`db.scanDrafts`) yang tidak muncul di katalog, konektor, maupun panel admin lama.
+1. Tempel URL sumber lalu **Scan link**. Worker memilih adapter (saat ini: *Manifest JSON*, *Fixture* lokal untuk pengujian, *Kiryuu*, dan *Shinigami* lewat JSON API `api.shngm.io`), mengembalikan metadata, sampul, dan daftar chapter. Hasilnya adalah **draft** (`db.scanDrafts`) yang tidak muncul di katalog, konektor, maupun panel admin lama.
 2. Periksa pratinjau (sampul, judul, deskripsi, status, kreator, genre, jumlah chapter, tanda BARU/SUDAH ADA) lalu klik **Download All**. FE meminta worker membuat job; progres per chapter/halaman dipantau dan dapat dibatalkan atau diulang per chapter. Chapter dinyatakan `COMPLETED` hanya jika **semua** halamannya valid (all-or-nothing); gambar dicek ukuran, checksum SHA-256, dan magic byte saat diterima.
 3. Buka **halaman finalisasi** (`#admin/scan/<draftId>`, tata letak sama dengan halaman detail): ubah judul/sinopsis/sampul/nomor chapter, keluarkan atau hapus chapter, lalu **Publish**. Publish bersifat atomik (satu penulisan `db.json`; berkas dipindah dengan rollback bila gagal) dan menyimpan chapter dengan kontrak yang sama dengan unggahan manual: `pages: [{ "page_number": 1, "image_url": "/media/<kunci>/chapters/chapter-<nomor>/001.webp" }]`.
 4. Scan ulang URL yang sama setelah dipublikasikan hanya menandai chapter baru; publish menambahkan chapter baru tanpa menimpa metadata yang sudah ada. Mengganti chapter yang sudah ada memerlukan konfirmasi eksplisit.
@@ -75,7 +75,7 @@ Konfigurasi FE (environment variables; lihat `.env.example`):
 | `SCAN_POLL_MS` | `1000` | Interval FE memantau worker. |
 | `SCAN_WORKER_UNREACHABLE_S` | `60` | Setelah worker tidak terjangkau selama ini, chapter yang berjalan ditandai `FAILED` (`WORKER_UNAVAILABLE`). |
 | `SCAN_DRAFT_EXPIRY_DAYS` | `7` | Draft yang tidak diubah selama ini dibuang otomatis beserta berkasnya. |
-| `LEMBAR_DATA_DIR` | `./data` | Lokasi `db.json` dan `media/` (berguna untuk pengujian). |
+| `AKUMA_DATA_DIR` | `./data` | Lokasi `db.json` dan `media/` (berguna untuk pengujian). |
 
 **Batas ukuran.** Batas jalur Scan Import — **300 halaman**, **150 MiB per chapter**, **15 MiB per gambar** (sampul tetap ≤ 5 MB) — berlaku **hanya** untuk Scan Import. Batas unggah manual **tidak berubah**: maksimum **80 halaman** dan **28 MB** total untuk unggahan gambar chapter, **5 MB** per sampul/gambar, dan **20 MB** per PDF.
 
@@ -88,9 +88,12 @@ Dua repo terpisah: **Front-End-Web-Mahnwa** (repo ini) dan **Back-End-Web-Mahnwa
 | Variabel | Default | Keterangan |
 | --- | --- | --- |
 | `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / acak (dicetak di terminal) | Login admin. Set kata sandi tetap sebelum mengekspos server. |
+| `AUTH_ENABLED` | `false` | Aktifkan login akun pembaca (FE memproksikan ke backend). Saat `false`, tombol Masuk menampilkan pesan belum aktif. |
+| `AUTH_BACKEND_URL` | `http://127.0.0.1:8000` | Alamat layanan auth backend (repo BE). Dipakai hanya server-ke-server; token sesi tidak pernah sampai ke browser. |
+| `AUTH_BACKEND_TIMEOUT_MS` | `8000` | Batas waktu panggilan FE → backend auth. |
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | Alamat dengar. |
 | `NODE_ENV` | — | `production` ⇒ cookie sesi bertanda `Secure` (butuh `localhost`/HTTPS). |
-| `LEMBAR_DATA_DIR` | `./data` | `db.json` dan `media/`. |
+| `AKUMA_DATA_DIR` | `./data` | `db.json` dan `media/`. |
 | `LEMBAR_SKIP_ENV` | — | Set `1` untuk melewati pemuatan `.env` (khusus tes; helper tes memakainya agar hasil tidak bergantung `.env` developer). |
 | `SCAN_WORKER_URL` | `http://127.0.0.1:8000` | Alamat worker. |
 | `SCAN_WORKER_TOKEN` | — (wajib) | Harus sama dengan `WORKER_TOKEN` worker. FE tetap start bila kosong/berbeda, tetapi worker menolak (401) dan Scan Import melaporkan `WORKER_UNAVAILABLE` (502). |
@@ -99,6 +102,12 @@ Dua repo terpisah: **Front-End-Web-Mahnwa** (repo ini) dan **Back-End-Web-Mahnwa
 | `SCAN_MIN_FREE_BYTES` / `SCAN_POLL_MS` / `SCAN_WORKER_UNREACHABLE_S` / `SCAN_DRAFT_EXPIRY_DAYS` / `SCAN_INGEST_CONCURRENCY` | `1073741824` / `1000` / `60` / `7` / `2` | Lihat tabel Scan Import di atas (`SCAN_INGEST_CONCURRENCY` = jumlah gambar yang diterima FE paralel). |
 
 Variabel worker (`WORKER_TOKEN`, `WORKER_BIND`, `WORKER_PORT`, `PUBLIC_BASE_URL`, `SCAN_DEV_MODE`, …) didokumentasikan lengkap di README repo BE (lihat `.env.example`). `python -m app` memuat `Back-End-Web-Mahnwa/.env` otomatis.
+
+### Login akun pembaca
+
+FE tidak lagi menyimpan kata sandi pembaca; ia berperan sebagai **BFF** ke layanan auth di repo BE. Endpoint `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/social/:provider/start`, dan `/api/auth/callback` hanya memproksikan permintaan (dan pertukaran kode handoff) ke backend. Token sesi backend **hanya** berpindah server-ke-server; browser tetap memegang cookie HttpOnly `akuma_session` milik FE (`SameSite=Lax`, 30 hari untuk pembaca; admin tetap `Strict`, 8 jam).
+
+Alur sosial: tombol di header mengarahkan browser ke backend untuk OAuth, lalu backend mengembalikan pembaca ke `/api/auth/callback?handoff=…`, yang menukar kode satu kali menjadi sesi FE dan mengalihkan ke halaman asal. Aktifkan dengan `AUTH_ENABLED=true` dan `AUTH_BACKEND_URL` yang menunjuk layanan BE. Login admin (`/#admin`) tetap lokal. Pendaftaran mandiri dihapus: akun pembaca dibuat lewat login sosial pertama atau dimigrasikan dari `db.json` memakai `tools/migrate_fe_users.py` di repo BE.
 
 ### Hubungan variabel FE ↔ worker
 
@@ -117,7 +126,7 @@ Variabel worker (`WORKER_TOKEN`, `WORKER_BIND`, `WORKER_PORT`, `PUBLIC_BASE_URL`
 scripts/dev-start.sh        # fixture :9100 + worker :8000 + FE :3000; Ctrl+C menghentikan semuanya
 ```
 
-Login `admin` / `admin-dev` (hanya dev), buka `http://127.0.0.1:3000/#admin` → tab **Scan Import** → tempel `http://127.0.0.1:9100/menara-biru/manifest.json`. Port/token dapat diubah lewat `FE_PORT`, `WORKER_PORT`, `FIXTURE_PORT`, `WORKER_TOKEN`, `ADMIN_PASSWORD`; log di `/tmp/lembar-dev/`. Konten sumber hanya placeholder orisinal buatan generator.
+Login `admin` / `admin-dev` (hanya dev), buka `http://127.0.0.1:3000/#admin` → tab **Scan Import** → tempel `http://127.0.0.1:9100/menara-biru/manifest.json`. Port/token dapat diubah lewat `FE_PORT`, `WORKER_PORT`, `FIXTURE_PORT`, `WORKER_TOKEN`, `ADMIN_PASSWORD`; log di `/tmp/akuma-dev/`. Konten sumber hanya placeholder orisinal buatan generator.
 
 **Manual (dua terminal)**
 
@@ -148,4 +157,4 @@ Slot halaman ditandai sebagai **IKLAN** dan kosong secara default. Pengaturan na
 
 ## Batas demo
 
-Untuk metadata Kiryuu tanpa berkas lokal, reader menampilkan pesan bahwa chapter belum tersedia. Pembaca tidak diarahkan ke situs eksternal. Formulir Hubungi/Laporkan memberi konfirmasi lokal saja dan tidak mengirim data. Favorit serta riwayat tetap di browser yang sama. Login admin memakai satu akun yang dikonfigurasi melalui environment; akun pembaca dapat mendaftar sendiri. Sebelum melayani pengguna umum, gunakan HTTPS dan kebijakan retensi sesuai kebutuhan.
+Untuk metadata Kiryuu tanpa berkas lokal, reader menampilkan pesan bahwa chapter belum tersedia. Pembaca tidak diarahkan ke situs eksternal. Formulir Hubungi/Laporkan memberi konfirmasi lokal saja dan tidak mengirim data. Favorit serta riwayat tetap di browser yang sama. Login admin memakai satu akun yang dikonfigurasi melalui environment; akun pembaca login lewat layanan backend (kata sandi atau sosial), tanpa pendaftaran mandiri di FE. Sebelum melayani pengguna umum, gunakan HTTPS dan kebijakan retensi sesuai kebutuhan.

@@ -6,6 +6,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const {startServer} = require('./helpers/server');
 const {startFakeWorker, scanResult} = require('./helpers/fake-worker');
+const {startFakeAuth} = require('./helpers/fake-auth');
 const {makeImage, dataUrl} = require('./helpers/images');
 
 const URL1 = 'https://sumber.example/seri-http/manifest.json';
@@ -25,7 +26,7 @@ function bigDb() { // 20 komik x 100 chapter x 30 halaman (fixture NFR-06)
 function fullDb() { const db = bigDb(); db.connectors = [{id: 'kiryuu', name: 'Kiryuu', method: 'x', enabled: false, state: 'nonaktif', message: '', lastSync: null, feedUrl: 'https://v7.kiryuu.to/manga/x/', intervalMinutes: 1440}, {id: 'demo-source', name: 'Demo', method: 'x', enabled: true, state: 'siap', message: '', lastSync: null, feedUrl: 'local:x', intervalMinutes: 5}]; return db; }
 
 test('NFR-03: semua /api/admin/scan* tanpa sesi admin -> 401 (semua metode)', async () => {
-  const w = await startFakeWorker(); const s = await startServer({env: {SCAN_WORKER_URL: w.url, SCAN_WORKER_TOKEN: w.token}});
+  const w = await startFakeWorker(); const a = await startFakeAuth(); const s = await startServer({auth: a, env: {SCAN_WORKER_URL: w.url, SCAN_WORKER_TOKEN: w.token}});
   try {
     for (const [m, p] of [['GET', '/api/admin/scan'], ['POST', '/api/admin/scan'], ['GET', '/api/admin/scan/d_x'], ['PATCH', '/api/admin/scan/d_x'], ['DELETE', '/api/admin/scan/d_x'], ['POST', '/api/admin/scan/d_x/download'], ['GET', '/api/admin/scan/d_x/progress'], ['POST', '/api/admin/scan/d_x/cancel'], ['POST', '/api/admin/scan/d_x/publish'], ['POST', '/api/admin/scan/d_x/chapters/c_1/retry'], ['GET', '/api/admin/scanx']]) {
       const r = await s.request(m, p, m === 'GET' ? undefined : {});
@@ -33,12 +34,10 @@ test('NFR-03: semua /api/admin/scan* tanpa sesi admin -> 401 (semua metode)', as
     }
     assert.equal(w.state.requests.length, 0, 'worker tidak boleh dihubungi tanpa auth');
     // pembaca biasa (bukan admin) juga ditolak
-    await s.request('POST', '/api/auth/register', {username: 'pembaca1', password: 'sandi-panjang-1'});
-    const reg = await fetch(s.base + '/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({username: 'pembaca1', password: 'sandi-panjang-1', role: 'user'})});
-    const cookie = reg.headers.get('set-cookie').split(';')[0];
+    const {cookie} = await s.readerLogin('pembaca1', 'sandi-panjang-1');
     const r = await fetch(s.base + '/api/admin/scan', {headers: {cookie}});
     assert.equal(r.status, 401);
-  } finally { await s.stop(); await w.close(); }
+  } finally { await s.stop(); await a.close(); await w.close(); }
 });
 
 test('NFR-03: path traversal / ID tidak valid -> 404 dan tidak pernah sampai ke worker', async () => {
@@ -95,6 +94,8 @@ test('alur lengkap via HTTP: scan -> draft tersembunyi -> download -> progress -
     for (const key of ['storageKey', 'scanSource', 'sourceUrl']) assert.ok(!(key in comic), key);
     for (const ch of comic.chapters) for (const key of ['pages', 'fileUrl', 'errorMessage', 'seriesUrl', 'importMethod']) assert.ok(!(key in ch), key);
     assert.ok(comic.chapters.every(c => c.pageCount >= 3));
+    // worker tidak mengirim released_at -> publish menstempel waktu publikasi
+    assert.ok(comic.chapters.every(c => typeof c.releasedAt === 'string' && !Number.isNaN(Date.parse(c.releasedAt))));
     // reader: endpoint halaman baru (publik) + berkas gambar terlayani
     const pages = await fetch(`${s.base}/api/comics/${comic.id}/chapters/${comic.chapters[0].id}/pages`).then(r => r.json());
     assert.equal(pages.pages.length, comic.chapters[0].pageCount);
@@ -105,6 +106,42 @@ test('alur lengkap via HTTP: scan -> draft tersembunyi -> download -> progress -
     assert.equal((await fetch(`${s.base}/api/comics/${comic.id}/chapters/nope/pages`)).status, 404);
     assert.equal(s.log().includes('pw-uji-123'), false);
   } finally { await s.stop(); await w.close(); }
+});
+
+test('katalog publik: chapter menyertakan releasedAt bila ada, dan menghilangkannya bila kosong', async () => {
+  const db = {comics: [{id: 'k1', title: 'Komik Waktu', alt: '', type: 'Manhwa', status: 'Berjalan', genres: [], rating: 8, year: 2026, author: '', synopsis: 'Uji.', cover: '', chapters: [
+    {id: 'ch-2', number: 2, title: '', date: '28 Sep 2026', releasedAt: '2026-10-11T04:00:00.000Z', status: 'COMPLETED', pages: []},
+    {id: 'ch-1', number: 1, title: '', date: '20 Sep 2026', pages: []}
+  ]}], announcements: [], connectors: [], settings: {}, ads: [], users: []};
+  const s = await startServer({db});
+  try {
+    const cat = await fetch(s.base + '/api/catalog').then(r => r.json());
+    const c = cat.comics.find(x => x.id === 'k1');
+    assert.equal(c.chapters[0].releasedAt, '2026-10-11T04:00:00.000Z');
+    assert.ok(!('releasedAt' in c.chapters[1]), 'chapter tanpa waktu rilis tidak memuat field releasedAt');
+  } finally { await s.stop(); }
+});
+
+test('GET /api/search: cari judul (case-insensitive, urut, limit), selalu 200, hanya id/title/cover', async () => {
+  const db = {comics: [
+    {id: 'langkah-kedua', title: 'Langkah Kedua', cover: '/media/a.png', chapters: []},
+    {id: 'senja-di-ujung-langit', title: 'Senja di Ujung Langit', cover: '/media/b.png', chapters: []},
+    {id: 'arsip-bulan-biru', title: 'Arsip Bulan Biru', cover: '', chapters: []}
+  ], announcements: [], connectors: [], settings: {}, ads: [], users: []};
+  const s = await startServer({db});
+  try {
+    const get = async (p) => { const r = await fetch(s.base + p); assert.equal(r.status, 200, p); return r.json(); };
+    assert.equal((await get('/api/search?q=l')).results.length, 0, 'F3: <2 karakter -> kosong');
+    assert.equal((await get('/api/search?q=')).results.length, 0);
+    assert.equal((await get('/api/search')).results.length, 0, 'tanpa q -> kosong');
+    assert.deepEqual((await get('/api/search?q=lang')).results.map(x => x.id), ['langkah-kedua', 'senja-di-ujung-langit'], 'F5 diawali dulu');
+    assert.deepEqual((await get('/api/search?q=BULAN')).results.map(x => x.id), ['arsip-bulan-biru'], 'F4 case-insensitive');
+    assert.deepEqual((await get('/api/search?q=xyz')).results, [], 'F13 tanpa hasil');
+    const rows = (await get('/api/search?q=an')).results;
+    assert.deepEqual(rows.map(x => x.id), ['arsip-bulan-biru', 'langkah-kedua', 'senja-di-ujung-langit'], 'urut abjad');
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['cover', 'id', 'title'], 'tanpa field internal');
+    assert.equal((await get('/api/search?q=an&limit=1')).results.length, 1, 'limit dipatuhi');
+  } finally { await s.stop(); }
 });
 
 test('worker mati -> POST scan memberi 502 WORKER_UNAVAILABLE (bukan hang / bukan 500)', async () => {
@@ -214,7 +251,7 @@ test('FR-17: tidak ada teks robots.txt/anti-bot pada README, app.js, dan pesan s
 // ---------------------------------------------------------------------------------------------
 // QA D-01: proteksi /media/_drafts/ tidak boleh dilewati lewat variasi path.
 test('QA D-01: /media/_drafts/ hanya admin — varian //, /./, %2e, %2f, %5c, \\, huruf besar, trailing, ../ semuanya 401 tanpa sesi', async () => {
-  const s = await startServer({db: bigDb()});
+  const a = await startFakeAuth(); const s = await startServer({db: bigDb(), auth: a});
   try {
     const dir = path.join(s.dir, 'media', '_drafts', 'd_abc123');
     fs.mkdirSync(dir, {recursive: true});
@@ -236,9 +273,7 @@ test('QA D-01: /media/_drafts/ hanya admin — varian //, /./, %2e, %2f, %5c, \\
       assert.ok(!r.body.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47])), `isi berkas bocor: ${v}`);
     }
     // sesi pembaca (bukan admin) juga ditolak
-    await s.request('POST', '/api/auth/register', {username: 'pembaca9', password: 'sandi-panjang-9'});
-    const reg = await fetch(s.base + '/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({username: 'pembaca9', password: 'sandi-panjang-9', role: 'user'})});
-    const readerCookie = reg.headers.get('set-cookie').split(';')[0];
+    const readerCookie = (await s.readerLogin('pembaca9', 'sandi-panjang-9')).cookie;
     for (const v of ['/media/_drafts/d_abc123/cover-x.png', '/media//_drafts/d_abc123/cover-x.png', '/media/%2F_drafts/d_abc123/cover-x.png']) {
       assert.equal((await s.rawGet(v, {cookie: readerCookie})).status, 401, `pembaca: ${v}`);
     }
@@ -259,7 +294,7 @@ test('QA D-01: /media/_drafts/ hanya admin — varian //, /./, %2e, %2f, %5c, \\
       assert.ok([403, 404].includes(r.status), `${v} -> ${r.status}`);
       assert.ok(!r.body.toString().includes('"comics"'), `db.json bocor lewat ${v}`);
     }
-  } finally { await s.stop(); }
+  } finally { await s.stop(); await a.close(); }
 });
 
 // QA D-03: kontrak FR-03 / §4.1 — field respons scan + endpoint cover.
@@ -315,8 +350,8 @@ test('QA D-03: respons scan memuat chaptersTotal/sourceCanonicalUrl/coverPreview
 // Regresi kritis (dilaporkan pengguna): setelah scan + unduh + publish, komik muncul di katalog tetapi
 // sampul tidak tertampil dan gambar chapter gagal dimuat (404). Akar masalah: server.js meng-require
 // lib/chapter-media SEBELUM memuat .env, sehingga MEDIA_ROOT tetap <repo>/data/media sementara endpoint
-// /media/... dilayani dari <LEMBAR_DATA_DIR>/media (dari .env) -> berkas tidak pernah ketemu.
-test('regresi: LEMBAR_DATA_DIR dari .env dipakai untuk db.json DAN media -> sampul & halaman scan terlayani', async () => {
+// /media/... dilayani dari <AKUMA_DATA_DIR>/media (dari .env) -> berkas tidak pernah ketemu.
+test('regresi: AKUMA_DATA_DIR dari .env dipakai untuk db.json DAN media -> sampul & halaman scan terlayani', async () => {
   const {startServerFromEnvFile} = require('./helpers/server-env-file');
   const w = await startFakeWorker();
   w.setScan(URL1, scanResult({url: URL1, numbers: [2, 1], title: 'Seri Env Uji'}));
@@ -343,8 +378,60 @@ test('regresi: LEMBAR_DATA_DIR dari .env dipakai untuk db.json DAN media -> samp
     const img = await fetch(s.base + pages.pages[0].image_url);
     assert.equal(img.status, 200, `halaman ${pages.pages[0].image_url} -> ${img.status}`);
     assert.match(img.headers.get('content-type'), /^image\//);
-    // 3) Media ditulis di bawah LEMBAR_DATA_DIR (dari .env), bukan folder data bawaan.
-    assert.ok(fs.existsSync(path.join(s.app, 'dev-data', 'media')), 'media harus di <LEMBAR_DATA_DIR>/media');
+    // 3) Media ditulis di bawah AKUMA_DATA_DIR (dari .env), bukan folder data bawaan.
+    assert.ok(fs.existsSync(path.join(s.app, 'dev-data', 'media')), 'media harus di <AKUMA_DATA_DIR>/media');
     assert.ok(!fs.existsSync(path.join(s.app, 'data', 'media')), 'tidak boleh menulis ke <repo>/data/media');
   } finally { await s.stop(); await w.close(); }
+});
+
+test('Fitur komentar: baca publik, tulis butuh sesi, XSS tersimpan sebagai teks, otorisasi & moderasi', async () => {
+  const a = await startFakeAuth(); const s = await startServer({auth: a});
+  try {
+    const cid = (await s.request('GET', '/api/catalog')).json.comics[0].id;
+    // Publik boleh membaca (masih kosong).
+    const empty = await s.request('GET', `/api/comments?targetId=${encodeURIComponent(cid)}`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.json.comments, []);
+    assert.equal(empty.json.totalCount, 0);
+    // Tanpa sesi tidak boleh menulis.
+    assert.equal((await s.request('POST', '/api/comments', {targetId: cid, body: 'halo'})).status, 401);
+    assert.equal((await s.request('POST', `/api/comments/x/like`, {})).status, 401);
+    // Daftar + kirim komentar (isi <script> harus tampil sebagai teks, bukan dieksekusi).
+    const budi = (await s.readerLogin('budi', 'rahasia123')).cookie;
+    const posted = await s.request('POST', '/api/comments', {targetId: cid, body: '<script>alert(1)</script>'}, {headers: {cookie: budi}});
+    assert.equal(posted.status, 201);
+    const list = await s.request('GET', `/api/comments?targetId=${encodeURIComponent(cid)}`);
+    assert.equal(list.json.totalCount, 1);
+    assert.equal(list.json.comments[0].body, '<script>alert(1)</script>');
+    assert.equal(list.json.comments[0].canDelete, false, 'pembaca anonim tidak melihat tombol hapus');
+    const id = list.json.comments[0].id;
+    // Suka idempoten.
+    assert.equal((await s.request('POST', `/api/comments/${id}/like`, {}, {headers: {cookie: budi}})).json.likeCount, 1);
+    assert.equal((await s.request('POST', `/api/comments/${id}/like`, {}, {headers: {cookie: budi}})).json.likeCount, 1);
+    // Lapor sekali.
+    assert.equal((await s.request('POST', `/api/comments/${id}/report`, {reason: 'spam'}, {headers: {cookie: budi}})).status, 200);
+    assert.equal((await s.request('POST', `/api/comments/${id}/report`, {reason: 'spam'}, {headers: {cookie: budi}})).status, 409);
+    // Validasi.
+    assert.equal((await s.request('POST', '/api/comments', {targetId: 'tidak-ada', body: 'x'}, {headers: {cookie: budi}})).status, 404);
+    assert.equal((await s.request('POST', '/api/comments', {targetId: cid, body: '   '}, {headers: {cookie: budi}})).status, 400);
+    assert.equal((await s.request('POST', '/api/comments', {targetId: cid, body: 'a'.repeat(1001)}, {headers: {cookie: budi}})).status, 400);
+    // Pembaca lain membalas (memakai akun kedua agar tidak kena rate limit).
+    const ani = (await s.readerLogin('ani', 'rahasia123')).cookie;
+    const reply = await s.request('POST', '/api/comments', {targetId: cid, parentId: id, body: 'balasan ani'}, {headers: {cookie: ani}});
+    assert.equal(reply.status, 201);
+    assert.equal(reply.json.comment.parentId, id);
+    const replies = await s.request('GET', `/api/comments/${id}/replies`);
+    assert.equal(replies.json.comments.length, 1);
+    // Ani tidak boleh menghapus komentar Budi.
+    assert.equal((await s.request('DELETE', `/api/comments/${id}`, undefined, {headers: {cookie: ani}})).status, 403);
+    // Admin melihat laporan dan bisa menghapus.
+    await s.login();
+    const reports = await s.request('GET', '/api/admin/comment-reports');
+    assert.equal(reports.status, 200);
+    assert.equal(reports.json.reports[0].commentId, id);
+    assert.equal((await s.request('DELETE', `/api/comments/${id}`, undefined)).status, 200);
+    const after = await s.request('GET', `/api/comments?targetId=${encodeURIComponent(cid)}`);
+    assert.equal(after.json.comments[0].isDeleted, true);
+    assert.equal(after.json.comments[0].replyCount, 1, 'balasan tetap tampil setelah komentar utama dihapus');
+  } finally { await s.stop(); await a.close(); }
 });

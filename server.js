@@ -7,11 +7,11 @@ const dns = require('node:dns/promises');
 const net = require('node:net');
 
 // Load local server-only settings without exposing credentials to browser code.
-// WAJIB dijalankan SEBELUM modul lokal di-require: lib/chapter-media.js membaca LEMBAR_DATA_DIR saat
+// WAJIB dijalankan SEBELUM modul lokal di-require: lib/chapter-media.js membaca AKUMA_DATA_DIR saat
 // modul dimuat, sehingga db.json dan media harus memakai direktori data yang SAMA. Bila .env dimuat
-// belakangan, media ditulis ke <repo>/data/media tetapi dilayani dari <LEMBAR_DATA_DIR>/media -> 404.
-// LEWATI saat LEMBAR_SKIP_ENV=1: dipakai tes agar tidak terpengaruh .env milik developer.
-if (process.env.LEMBAR_SKIP_ENV !== '1') {
+// belakangan, media ditulis ke <repo>/data/media tetapi dilayani dari <AKUMA_DATA_DIR>/media -> 404.
+// LEWATI saat AKUMA_SKIP_ENV=1: dipakai tes agar tidak terpengaruh .env milik developer.
+if (process.env.AKUMA_SKIP_ENV !== '1') {
   try {
     const envFile = fsSync.readFileSync(path.join(__dirname, '.env'), 'utf8');
     for (const line of envFile.split(/\r?\n/)) {
@@ -31,19 +31,28 @@ const {createDbWriter} = require('./lib/db-writer');
 const {createWorkerClient} = require('./lib/scan-worker');
 const {createScanService} = require('./lib/scan-service');
 const {createScanHandler} = require('./lib/scan-routes');
+const {createSubscriptions} = require('./lib/subscriptions');
+const {createSubscriptionRoutes} = require('./lib/subscription-routes');
 const {scanLimits} = require('./lib/scan-media');
 const {resolveRequestPath} = require('./lib/media-path');
 const {publicCatalog, adminComic, detailForReader, sendJson} = require('./lib/public-catalog');
+const {searchComics} = require('./lib/search');
+const {createCommentStore} = require('./lib/comment-store');
+const {parseKiryuuMetadata} = require('./lib/kiryuu-metadata');
 
 const ROOT = __dirname;
-const DATA = path.join(process.env.LEMBAR_DATA_DIR || path.join(ROOT, 'data'), 'db.json');
+const DATA = path.join(process.env.AKUMA_DATA_DIR || path.join(ROOT, 'data'), 'db.json');
 const DATA_DIR = path.dirname(DATA);
+// Direktori data harus ada sebelum komentar dibuka (SQLite tidak membuat folder induk).
+fsSync.mkdirSync(DATA_DIR, {recursive: true});
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const MAX_BODY = 40_000_000;
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || crypto.randomBytes(18).toString('base64url');
 const dbWriter = createDbWriter(DATA);
+// Komentar disimpan di SQLite terpisah (bukan db.json) agar tulis/baca komentar tidak membebani katalog.
+const commentStore = createCommentStore(path.join(DATA_DIR, 'comments.db'));
 // Konfigurasi scan-import (limit khusus jalur scan; limit unggah manual tidak berubah).
 const envInt = (name, def) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? Math.floor(v) : def; };
 const SCAN_CONFIG = {
@@ -57,22 +66,47 @@ const SCAN_CONFIG = {
   ingestConcurrency: envInt('SCAN_INGEST_CONCURRENCY', 2),
   draftExpiryDays: envInt('SCAN_DRAFT_EXPIRY_DAYS', 7)
 };
+// Auto-Sync: registri langganan sumber seri + sinkronisasi terjadwal (opsional).
+const SUBSCRIPTIONS_CONFIG = {
+  enabled: /^(1|true|yes)$/i.test(process.env.AUTO_SYNC_ENABLED || ''),
+  tickS: envInt('AUTO_SYNC_TICK_S', 60),
+  concurrency: envInt('AUTO_SYNC_CONCURRENCY', 1),
+  maxNewPerRun: envInt('AUTO_SYNC_MAX_NEW_PER_RUN', 5),
+  syncTimeoutMs: envInt('AUTO_SYNC_TIMEOUT_S', 1800) * 1000,
+  defaultInterval: envInt('AUTO_SYNC_DEFAULT_INTERVAL', 360),
+  minInterval: 5,
+  maxInterval: 10080,
+  jitterS: envInt('AUTO_SYNC_JITTER_S', 60),
+  maxFailures: envInt('AUTO_SYNC_MAX_FAILURES', 5),
+  pollMs: SCAN_CONFIG.pollMs
+};
+// Login akun pembaca: FE berperan sebagai BFF. Logika & penyimpanan akun ada di backend.
+// Hanya token sesi (server-to-server) yang melintas; browser tetap memakai cookie HttpOnly milik FE.
+const AUTH_CONFIG = {
+  enabled: /^(1|true|yes)$/i.test(process.env.AUTH_ENABLED || ''),
+  backendUrl: (process.env.AUTH_BACKEND_URL || process.env.SCAN_WORKER_URL || 'http://127.0.0.1:8000').replace(/\/+$/, ''),
+  socialProviders: ['google', 'discord', 'x'],
+  timeoutMs: envInt('AUTH_BACKEND_TIMEOUT_MS', 8000)
+};
 const sessions = new Map();
 const loginAttempts = new Map();
+
+// Waktu rilis relatif untuk data contoh (agar "waktu relatif"/label "Baru" dapat didemokan).
+const hoursAgo = h => new Date(Date.now() - h * 3600000).toISOString();
 
 const seed = {
   comics: [
     { id:'swordmasters-youngest-son', title:"Swordmaster's Youngest Son", alt:'', type:'Manhwa', status:'Berjalan', genres:['Aksi','Petualangan','Fantasi','Seni Bela Diri'], rating:7.7, year:2022, author:'', synopsis:'Putra termuda dari keluarga pendekar Runcandel pernah dianggap tidak berbakat. Setelah kehidupannya berakhir, ia mendapat kesempatan kedua untuk menentukan jalan dan menggunakan kekuatannya sendiri.', cover:'', source:'Kiryuu ID', sourceUrl:'https://v7.kiryuu.to/manga/swordmasters-youngest-son/', externalContent:true, metadataCheckedAt:'2026-09-28', chapters:[] },
-    { id:'senja-di-ujung-langit', title:'Senja di Ujung Langit', alt:'The Horizon Afterglow', type:'Manhwa', status:'Berjalan', genres:['Fantasi','Petualangan','Aksi'], rating:9.2, year:2024, author:'Studio Awan', synopsis:'Ketika langit retak dan pulau-pulau melayang mulai jatuh, seorang kartografer muda menemukan peta yang menggambar masa depan.', cover:'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=700&q=85', banner:'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=1800&q=85', chapters:[{id:'ch-24',number:24,title:'Peta yang Terbakar',date:'28 Sep 2026'},{id:'ch-23',number:23,title:'Kota di Atas Awan',date:'21 Sep 2026'},{id:'ch-22',number:22,title:'Kompas Retak',date:'14 Sep 2026'}] },
-    { id:'arsip-bulan-biru', title:'Arsip Bulan Biru', alt:'Blue Moon Archive', type:'Manhwa', status:'Berjalan', genres:['Drama','Misteri','Romansa'], rating:8.8, year:2025, author:'Mira Han', synopsis:'Di perpustakaan yang hanya muncul saat bulan biru, setiap buku menyimpan satu kenangan yang terlupakan.', cover:'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-12',number:12,title:'Nama di Sampul',date:'27 Sep 2026'},{id:'ch-11',number:11,title:'Lantai Ketujuh',date:'20 Sep 2026'}] },
-    { id:'kota-tanpa-pagi', title:'Kota Tanpa Pagi', alt:'City Without Dawn', type:'Manhwa', status:'Tamat', genres:['Aksi','Drama','Fantasi'], rating:9.0, year:2023, author:'J. Kwon', synopsis:'Seorang kurir melintasi kota yang kehilangan matahari untuk mengantar surat terakhir kepada sang penjaga waktu.', cover:'https://images.unsplash.com/photo-1519501025264-65ba15a82390?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-48',number:48,title:'Hari Pertama',date:'12 Jun 2026'},{id:'ch-47',number:47,title:'Jam Terakhir',date:'05 Jun 2026'}] },
-    { id:'ramuan-untuk-naga', title:'Ramuan untuk Naga', alt:'A Potion for the Dragon', type:'Manhua', status:'Berjalan', genres:['Komedi','Fantasi','Romansa'], rating:8.4, year:2025, author:'Lin Yao', synopsis:'Apoteker desa yang canggung mendapat pelanggan tak terduga: naga kuno yang hanya bisa berubah bentuk saat bersin.', cover:'https://images.unsplash.com/photo-1518709594023-6eab9bab7b23?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-31',number:31,title:'Tamu Bersisik',date:'26 Sep 2026'},{id:'ch-30',number:30,title:'Resep Rahasia',date:'19 Sep 2026'}] },
-    { id:'langkah-kedua', title:'Langkah Kedua', alt:'The Second Step', type:'Manga', status:'Berjalan', genres:['Olahraga','Drama'], rating:8.7, year:2024, author:'Aki Mori', synopsis:'Setelah cedera mengakhiri karier larinya, Nara menemukan alasan baru untuk kembali ke lintasan.', cover:'https://images.unsplash.com/photo-1530549387789-4c1017266635?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-19',number:19,title:'Garis Mulai',date:'25 Sep 2026'},{id:'ch-18',number:18,title:'Napas Panjang',date:'18 Sep 2026'}] },
-    { id:'kebun-bintang', title:'Kebun Bintang', alt:'Garden of Stars', type:'Manhwa', status:'Berjalan', genres:['Slice of Life','Fantasi','Drama'], rating:8.6, year:2025, author:'Dara Kim', synopsis:'Di atap apartemen sempit, seorang penjaga malam menanam bunga yang hanya mekar di bawah cahaya bintang.', cover:'https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-8',number:8,title:'Benih Pertama',date:'24 Sep 2026'}] },
-    { id:'kode-terakhir', title:'Kode Terakhir', alt:'The Last Protocol', type:'Manhwa', status:'Hiatus', genres:['Aksi','Fiksi Ilmiah','Misteri'], rating:9.1, year:2022, author:'Zero Unit', synopsis:'Di kota yang dijalankan kecerdasan buatan, seorang teknisi menemukan satu baris kode yang seharusnya sudah dihapus.', cover:'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-56',number:56,title:'Mode Aman',date:'01 Aug 2026'}] },
-    { id:'surat-untuk-kemarin', title:'Surat untuk Kemarin', alt:'Letters to Yesterday', type:'Manga', status:'Berjalan', genres:['Romansa','Drama'], rating:8.3, year:2024, author:'Hana Sato', synopsis:'Dua tetangga bertukar surat lewat kotak pos tua yang entah bagaimana mengirim pesan ke masa lalu.', cover:'https://images.unsplash.com/photo-1490730141103-6cac27aaab94?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-14',number:14,title:'Kertas Lipat',date:'22 Sep 2026'}] }
+    { id:'senja-di-ujung-langit', title:'Senja di Ujung Langit', alt:'The Horizon Afterglow', type:'Manhwa', status:'Berjalan', genres:['Fantasi','Petualangan','Aksi'], rating:9.2, year:2024, author:'Studio Awan', synopsis:'Ketika langit retak dan pulau-pulau melayang mulai jatuh, seorang kartografer muda menemukan peta yang menggambar masa depan.', cover:'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=700&q=85', banner:'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=1800&q=85', chapters:[{id:'ch-24',number:24,title:'Peta yang Terbakar',date:'28 Sep 2026',releasedAt:hoursAgo(3)},{id:'ch-23',number:23,title:'Kota di Atas Awan',date:'21 Sep 2026',releasedAt:hoursAgo(30)},{id:'ch-22',number:22,title:'Kompas Retak',date:'14 Sep 2026',releasedAt:hoursAgo(120)}] },
+    { id:'arsip-bulan-biru', title:'Arsip Bulan Biru', alt:'Blue Moon Archive', type:'Manhwa', status:'Berjalan', genres:['Drama','Misteri','Romansa'], rating:8.8, year:2025, author:'Mira Han', synopsis:'Di perpustakaan yang hanya muncul saat bulan biru, setiap buku menyimpan satu kenangan yang terlupakan.', cover:'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-12',number:12,title:'Nama di Sampul',date:'27 Sep 2026',releasedAt:hoursAgo(8)},{id:'ch-11',number:11,title:'Lantai Ketujuh',date:'20 Sep 2026',releasedAt:hoursAgo(72)}] },
+    { id:'kota-tanpa-pagi', title:'Kota Tanpa Pagi', alt:'City Without Dawn', type:'Manhwa', status:'Tamat', genres:['Aksi','Drama','Fantasi'], rating:9.0, year:2023, author:'J. Kwon', synopsis:'Seorang kurir melintasi kota yang kehilangan matahari untuk mengantar surat terakhir kepada sang penjaga waktu.', cover:'https://images.unsplash.com/photo-1519501025264-65ba15a82390?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-48',number:48,title:'Hari Pertama',date:'12 Jun 2026',releasedAt:hoursAgo(144)},{id:'ch-47',number:47,title:'Jam Terakhir',date:'05 Jun 2026',releasedAt:hoursAgo(240)}] },
+    { id:'ramuan-untuk-naga', title:'Ramuan untuk Naga', alt:'A Potion for the Dragon', type:'Manhua', status:'Berjalan', genres:['Komedi','Fantasi','Romansa'], rating:8.4, year:2025, author:'Lin Yao', synopsis:'Apoteker desa yang canggung mendapat pelanggan tak terduga: naga kuno yang hanya bisa berubah bentuk saat bersin.', cover:'https://images.unsplash.com/photo-1518709594023-6eab9bab7b23?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-31',number:31,title:'Tamu Bersisik',date:'26 Sep 2026',releasedAt:hoursAgo(20)},{id:'ch-30',number:30,title:'Resep Rahasia',date:'19 Sep 2026',releasedAt:hoursAgo(96)}] },
+    { id:'langkah-kedua', title:'Langkah Kedua', alt:'The Second Step', type:'Manga', status:'Berjalan', genres:['Olahraga','Drama'], rating:8.7, year:2024, author:'Aki Mori', synopsis:'Setelah cedera mengakhiri karier larinya, Nara menemukan alasan baru untuk kembali ke lintasan.', cover:'https://images.unsplash.com/photo-1530549387789-4c1017266635?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-19',number:19,title:'Garis Mulai',date:'25 Sep 2026',releasedAt:hoursAgo(44)},{id:'ch-18',number:18,title:'Napas Panjang',date:'18 Sep 2026',releasedAt:hoursAgo(144)}] },
+    { id:'kebun-bintang', title:'Kebun Bintang', alt:'Garden of Stars', type:'Manhwa', status:'Berjalan', genres:['Slice of Life','Fantasi','Drama'], rating:8.6, year:2025, author:'Dara Kim', synopsis:'Di atap apartemen sempit, seorang penjaga malam menanam bunga yang hanya mekar di bawah cahaya bintang.', cover:'https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-8',number:8,title:'Benih Pertama',date:'24 Sep 2026',releasedAt:hoursAgo(100)}] },
+    { id:'kode-terakhir', title:'Kode Terakhir', alt:'The Last Protocol', type:'Manhwa', status:'Hiatus', genres:['Aksi','Fiksi Ilmiah','Misteri'], rating:9.1, year:2022, author:'Zero Unit', synopsis:'Di kota yang dijalankan kecerdasan buatan, seorang teknisi menemukan satu baris kode yang seharusnya sudah dihapus.', cover:'https://images.unsplash.com/photo-1519608487953-e999c86e7455?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-56',number:56,title:'Mode Aman',date:'01 Aug 2026',releasedAt:hoursAgo(960)}] },
+    { id:'surat-untuk-kemarin', title:'Surat untuk Kemarin', alt:'Letters to Yesterday', type:'Manga', status:'Berjalan', genres:['Romansa','Drama'], rating:8.3, year:2024, author:'Hana Sato', synopsis:'Dua tetangga bertukar surat lewat kotak pos tua yang entah bagaimana mengirim pesan ke masa lalu.', cover:'https://images.unsplash.com/photo-1490730141103-6cac27aaab94?auto=format&fit=crop&w=700&q=85', chapters:[{id:'ch-14',number:14,title:'Kertas Lipat',date:'22 Sep 2026',releasedAt:hoursAgo(168)}] }
   ],
-  announcements:[{title:'Selamat datang di Lembar!',date:'28 Sep 2026',body:'Nikmati katalog demo dan fitur lanjut membaca. Semua judul dan chapter pada versi ini adalah data contoh.'},{title:'Pembaruan katalog',date:'20 Sep 2026',body:'Filter genre dan status kini tersedia di halaman katalog.'}],
+  announcements:[{title:'Selamat datang di Akuma!',date:'28 Sep 2026',body:'Nikmati katalog demo dan fitur lanjut membaca. Semua judul dan chapter pada versi ini adalah data contoh.'},{title:'Pembaruan katalog',date:'20 Sep 2026',body:'Filter genre dan status kini tersedia di halaman katalog.'}],
   connectors:[
     {id:'kiryuu',name:'Kiryuu',method:'Metadata halaman publik',enabled:false,state:'nonaktif',message:'Siap untuk metadata halaman seri saja. Konten chapter hanya tersedia setelah diunggah ke penyimpanan lokal.',lastSync:null,feedUrl:'',intervalMinutes:1440},
     {id:'shinigami',name:'Shinigami',method:'Belum dikonfigurasi',enabled:false,state:'nonaktif',message:'Konektor nonaktif. Tidak ada pengambilan konten yang diuji atau dikonfigurasi.',lastSync:null,feedUrl:'',intervalMinutes:1440},
@@ -150,12 +184,20 @@ const json=(res,status,obj)=>sendJson(res,status,obj);
 const scanWorker=createWorkerClient({baseUrl:SCAN_CONFIG.workerUrl,token:SCAN_CONFIG.workerToken});
 const scanService=createScanService({getDb:()=>dbPromise,saveDb,worker:scanWorker,config:SCAN_CONFIG});
 const scanHandler=createScanHandler({service:scanService,config:SCAN_CONFIG,json,readBody:req=>body(req)});
+const subscriptions=createSubscriptions({getDb:()=>dbPromise,saveDb,service:scanService,config:SUBSCRIPTIONS_CONFIG});
+const subscriptionHandler=createSubscriptionRoutes({service:subscriptions,json,readBody:req=>body(req)});
+subscriptions.start();
 dbPromise.then(async()=>{await scanService.sweepExpired();await scanService.recover();}).catch(error=>console.error('[scan-startup]',error.message));
 setInterval(()=>scanService.sweepExpired().catch(error=>console.error('[scan-sweep]',error.message)),3_600_000).unref();
-const cookieSession=req=>{const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('lembar_session='))?.slice('lembar_session='.length);const id=raw&&decodeURIComponent(raw);const session=id&&sessions.get(id);if(session&&session.expires>Date.now())return session;if(id)sessions.delete(id);return null;};
-const setSession=(res,sessionId)=>res.setHeader('set-cookie',`lembar_session=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV==='production'?'; Secure':''}`);
-const passwordRecord=async password=>{const salt=crypto.randomBytes(16);const hash=await new Promise((resolve,reject)=>crypto.scrypt(password,salt,64,(e,v)=>e?reject(e):resolve(v)));return `${salt.toString('hex')}:${hash.toString('hex')}`;};
-const passwordMatches=async(password,record)=>{try{const [s,h]=record.split(':');const expected=Buffer.from(h,'hex');const actual=await new Promise((resolve,reject)=>crypto.scrypt(password,Buffer.from(s,'hex'),expected.length,(e,v)=>e?reject(e):resolve(v)));return expected.length===actual.length&&crypto.timingSafeEqual(expected,actual);}catch{return false;}};
+const cookieSession=req=>{const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('akuma_session='))?.slice('akuma_session='.length);const id=raw&&decodeURIComponent(raw);const session=id&&sessions.get(id);if(session&&session.expires>Date.now())return session;if(id)sessions.delete(id);return null;};
+const setSession=(res,sessionId,{reader=false}={})=>res.setHeader('set-cookie',`akuma_session=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=${reader?'Lax':'Strict'}; Path=/; Max-Age=${reader?2592000:28800}${process.env.NODE_ENV==='production'?'; Secure':''}`);
+const clearSessionCookie=res=>res.setHeader('set-cookie',`akuma_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV==='production'?'; Secure':''}`);
+const READER_TTL_MS=30*24*60*60*1000;
+const createReaderSession=(user,beToken)=>{const id=crypto.randomBytes(32).toString('base64url');sessions.set(id,{id,reader:true,role:user.role||'user',username:user.username,userId:user.id,user,beToken,expires:Date.now()+READER_TTL_MS});return id;};
+const relativeReturn=raw=>{const v=String(raw||'').trim();return v.startsWith('/')&&!v.startsWith('//')&&!v.includes('\\')&&!/\r|\n|\t/.test(v)?v:'/';};
+// Alihkan kembali ke rute asal sambil menandai supaya FE membuka modal login (bukan halaman /#login).
+const authModalUrl=(returnTo,kind)=>{const h=String(returnTo||'');const path=(h.startsWith('/#')?h.slice(2):'').split('?')[0]||'home';return `/#${path}?auth=error&error=${encodeURIComponent(kind)}`;};
+async function authBackend(path,{method='GET',token,payload}={}){const headers={'content-type':'application/json'};if(token)headers.authorization=`Bearer ${token}`;const res=await fetch(AUTH_CONFIG.backendUrl+path,{method,headers,body:payload!==undefined?JSON.stringify(payload):undefined,signal:AbortSignal.timeout(AUTH_CONFIG.timeoutMs)});let data={};try{data=await res.json();}catch{}return {ok:res.ok,status:res.status,data};}
 const safeUrl=(raw)=>{try{const u=new URL(raw);return ['http:','https:'].includes(u.protocol)&&!['localhost','127.0.0.1','::1'].includes(u.hostname)&&!/^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\./.test(u.hostname)?u:null;}catch{return null;}};
 const privateIp=ip=>{if(net.isIPv4(ip))return ip.startsWith('10.')||ip.startsWith('127.')||ip.startsWith('169.254.')||ip.startsWith('192.168.')||/^172\.(1[6-9]|2\d|3[01])\./.test(ip)||ip==='0.0.0.0';if(net.isIPv6(ip))return ip==='::1'||ip==='::'||ip.toLowerCase().startsWith('fc')||ip.toLowerCase().startsWith('fd')||/^fe[89ab]/i.test(ip)||ip.toLowerCase().startsWith('::ffff:127.');return true;};
 async function publicFeedUrl(raw){const u=safeUrl(raw);if(!u||u.username||u.password||u.hostname.endsWith('.localhost')||u.hostname.endsWith('.local'))return null;if(net.isIP(u.hostname))return privateIp(u.hostname)?null:u;try{const records=await dns.lookup(u.hostname,{all:true,verbatim:true});return records.length&&records.every(x=>!privateIp(x.address))?u:null;}catch{return null;}}
@@ -176,20 +218,9 @@ async function syncDemoConnector(db,c){
   comic.chapters.unshift({id:chapterId,number:String(latest.chapter),title:String(latest.title||'').slice(0,140),date:String(latest.date||new Date().toLocaleDateString('id-ID')),pages:savedPages,source:'Sumber Demo Lokal'});
   c.state='aktif';c.lastSync=new Date().toISOString();c.message=`Chapter ${latest.chapter} baru ditemukan dan ${savedPages.length} halaman demo disimpan di server lokal.`;await saveDb(db);return {added:1,latest:latest.chapter,pages:savedPages.length,message:c.message,lastSync:c.lastSync};
 }
-function decodeEntities(s){return String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCodePoint(parseInt(n,16)));}
-async function login(req,res,b,db){const username=String(b.username||'').trim().toLowerCase(),role=b.role==='admin'?'admin':'user',key=`${req.socket.remoteAddress}:${role}:${username}`,attempt=loginAttempts.get(key);if(attempt&&attempt.count>=8&&Date.now()-attempt.at<15*60_000)return json(res,429,{error:'Terlalu banyak percobaan login. Coba lagi dalam 15 menit.'});let valid=false;if(role==='admin')valid=username===ADMIN_USER.toLowerCase()&&String(b.password||'')===ADMIN_PASSWORD;else{const user=(db.users||[]).find(x=>x.username===username);valid=Boolean(user&&await passwordMatches(String(b.password||''),user.passwordHash));}if(!valid){const current=loginAttempts.get(key);loginAttempts.set(key,{count:current&&Date.now()-current.at<15*60_000?current.count+1:1,at:Date.now()});return json(res,401,{error:'Nama pengguna atau kata sandi tidak cocok.'});}loginAttempts.delete(key);const id=crypto.randomBytes(32).toString('base64url'),session={id,username,role,expires:Date.now()+8*60*60_000};sessions.set(id,session);setSession(res,id);return json(res,200,{authenticated:true,username,role});}
-function parseKiryuuMetadata(html,pageUrl){
-  const attr=(s,n)=>{const m=s.match(new RegExp(`\\b${n}\\s*=\\s*(["'])(.*?)\\1`,'i'));return m?decodeEntities(m[2]):'';};
-  const meta={}; for(const m of html.matchAll(/<meta\b([^>]*)>/gi)){const name=(attr(m[1],'property')||attr(m[1],'name')).toLowerCase();if(name)meta[name]=attr(m[1],'content');}
-  const getText=s=>decodeEntities(s.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim());
-  let title=meta['og:title']||'';if(!title){const h=html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);title=h?getText(h[1]):'';}title=title.replace(/^Baca\s+/i,'').replace(/\s+Bahasa Indonesia.*$/i,'').replace(/\s*[|–-]\s*Kiryuu.*$/i,'').trim().slice(0,140);
-  const synopsis=(meta.description||meta['og:description']||'').slice(0,900);
-  const plain=getText(html).toLowerCase();const genres=[];for(const m of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)){const href=attr(m[1],'href');if(/\/genre\//i.test(href)){const g=getText(m[2]);if(g&&!genres.includes(g))genres.push(g);}}
-    if(!title||!/^https:\/\/(?:www\.)?v7\.kiryuu\.to\/manga\//i.test(pageUrl))throw Error('Halaman tidak dikenali sebagai halaman seri Kiryuu publik.');
-
-  const ratingMatch=plain.match(/([0-9]+(?:\.[0-9]+)?)\s*ratings?/i);const yearMatch=plain.match(/\breleased\s+(20\d{2})\b/i);const status=/\b(completed|complete|tamat)\b/i.test(plain)?'Tamat':/\b(hiatus|on hold)\b/i.test(plain)?'Hiatus':'Berjalan';
-  return {id:'kiryuu-'+pageUrl.match(/\/manga\/([^/]+)/i)[1].toLowerCase().replace(/[^a-z0-9-]/g,'-'),title,type:'Manhwa',status,genres:genres.slice(0,8),rating:ratingMatch?Number(ratingMatch[1]):null,year:yearMatch?Number(yearMatch[1]):null,author:'',synopsis:synopsis||'Sinopsis tersedia di halaman seri sumber.',cover:'',source:'Kiryuu ID',sourceUrl:pageUrl,externalContent:true,chapters:[]};
-}
+function adminLogin(req,res,b){const username=String(b.username||'').trim().toLowerCase(),key=`${req.socket.remoteAddress}:admin:${username}`,attempt=loginAttempts.get(key);if(attempt&&attempt.count>=8&&Date.now()-attempt.at<15*60_000)return json(res,429,{error:'Terlalu banyak percobaan login. Coba lagi dalam 15 menit.'});if(!(username===ADMIN_USER.toLowerCase()&&String(b.password||'')===ADMIN_PASSWORD)){const current=loginAttempts.get(key);loginAttempts.set(key,{count:current&&Date.now()-current.at<15*60_000?current.count+1:1,at:Date.now()});return json(res,401,{error:'Nama pengguna atau kata sandi tidak cocok.'});}loginAttempts.delete(key);const id=crypto.randomBytes(32).toString('base64url');sessions.set(id,{id,userId:'admin:'+username,username,role:'admin',expires:Date.now()+8*60*60_000});setSession(res,id);return json(res,200,{authenticated:true,username,role:'admin'});}
+async function readerPasswordLogin(req,res,b){if(!AUTH_CONFIG.enabled)return json(res,503,{error:'Fitur login belum aktif di server ini.'});const username=String(b.username||'').trim().toLowerCase(),password=String(b.password||'');if(!username||!password)return json(res,400,{error:'Nama pengguna dan kata sandi wajib diisi.'});const key=`${req.socket.remoteAddress}:user:${username}`,attempt=loginAttempts.get(key);if(attempt&&attempt.count>=8&&Date.now()-attempt.at<15*60_000)return json(res,429,{error:'Terlalu banyak percobaan login. Coba lagi dalam 15 menit.'});let out;try{out=await authBackend('/auth/login',{method:'POST',payload:{username,password}});}catch{return json(res,502,{error:'Layanan login tidak dapat dihubungi.'});}if(!out.ok){const current=loginAttempts.get(key);loginAttempts.set(key,{count:current&&Date.now()-current.at<15*60_000?current.count+1:1,at:Date.now()});return json(res,out.status||401,{error:out.data.error||'Nama pengguna atau kata sandi tidak cocok.'});}loginAttempts.delete(key);const id=createReaderSession(out.data.user,out.data.session_token);setSession(res,id,{reader:true});return json(res,200,{authenticated:true,username:out.data.user.username,role:out.data.user.role||'user',user:out.data.user});}
+async function login(req,res,b,db){return b.role==='admin'?adminLogin(req,res,b):readerPasswordLogin(req,res,b);}
 
 async function syncConnector(id){
   const db=await dbPromise, c=db.connectors.find(x=>x.id===id); if(!c)throw Object.assign(Error('Konektor tidak ditemukan'),{status:404});
@@ -198,12 +229,12 @@ async function syncConnector(id){
   if(!['public-feed','kiryuu'].includes(id))throw Object.assign(Error('Konektor ini nonaktif karena tidak ada metode publik yang diverifikasi.'),{status:400});
   const u=await publicFeedUrl(c.feedUrl);if(!u)throw Object.assign(Error('URL feed tidak valid atau mengarah ke host lokal/nonpublik.'),{status:400});
   if(id==='kiryuu'&&(u.hostname!=='v7.kiryuu.to'||!u.pathname.startsWith('/manga/')||u.pathname.includes('/chapter-')))throw Object.assign(Error('Konektor Kiryuu hanya menerima URL halaman seri publik di v7.kiryuu.to/manga/. Gambar chapter tidak pernah diambil.'),{status:400});
-  const agent='LembarMetadataBot/1.0 (+metadata-only; contact: admin of this installation)';
+  const agent='AkumaMetadataBot/1.0 (+metadata-only; contact: admin of this installation)';
   try {
     if(id==='kiryuu'&&kiryuuCache.has(u.href)&&Date.now()-kiryuuCache.get(u.href).cachedAt<6*60*60*1000){const cached=kiryuuCache.get(u.href).item;const existing=db.comics.find(x=>x.id===cached.id);if(existing)Object.assign(existing,cached,{syncedAt:new Date().toISOString()});else db.comics.push({...cached,syncedAt:new Date().toISOString()});c.state='aktif';c.message='Metadata seri dimuat dari cache 6 jam. Chapter tetap memerlukan berkas lokal.';c.lastSync=new Date().toISOString();await saveDb(db);return {added:existing?0:1,seen:1,cached:true,message:c.message,lastSync:c.lastSync};}
     const robotsUrl=new URL('/robots.txt',u.origin); const rr=await fetch(robotsUrl,{headers:{'user-agent':agent},signal:AbortSignal.timeout(10000),redirect:'error'});
     if(blockedStatus(rr.status)){c.state='akses-dibatasi';c.message=`Akses dibatasi oleh robots.txt server (${rr.status}). Sinkronisasi dihentikan.`;await saveDb(db);throw Object.assign(Error(c.message),{status:403,alreadySaved:true});}
-    if(rr.ok){const rules=(await rr.text()).slice(0,200000);let ua=false,disallow=false;for(const line of rules.split(/\r?\n/)){const [k,...v]=line.split(':');if(k?.trim().toLowerCase()==='user-agent')ua=v.join(':').trim()==='*'||v.join(':').trim().toLowerCase()==='lembar';if(ua&&k?.trim().toLowerCase()==='disallow'&&v.join(':').trim()&&u.pathname.startsWith(v.join(':').trim()))disallow=true;}if(disallow){c.state='akses-dibatasi';c.message='Akses dibatasi oleh aturan robots.txt. Sinkronisasi dihentikan.';await saveDb(db);throw Object.assign(Error(c.message),{status:403,alreadySaved:true});}}
+    if(rr.ok){const rules=(await rr.text()).slice(0,200000);let ua=false,disallow=false;for(const line of rules.split(/\r?\n/)){const [k,...v]=line.split(':');if(k?.trim().toLowerCase()==='user-agent')ua=v.join(':').trim()==='*'||v.join(':').trim().toLowerCase()==='akuma';if(ua&&k?.trim().toLowerCase()==='disallow'&&v.join(':').trim()&&u.pathname.startsWith(v.join(':').trim()))disallow=true;}if(disallow){c.state='akses-dibatasi';c.message='Akses dibatasi oleh aturan robots.txt. Sinkronisasi dihentikan.';await saveDb(db);throw Object.assign(Error(c.message),{status:403,alreadySaved:true});}}
     await pause(1200);
     const response=await fetch(u,{headers:{'user-agent':agent,accept:'application/json, application/feed+json, application/rss+xml, application/xml, text/xml'},signal:AbortSignal.timeout(15000),redirect:'error'});
     if(blockedStatus(response.status)){const retry=response.headers.get('retry-after');c.state='akses-dibatasi';c.message=`Akses dibatasi oleh sumber (HTTP ${response.status}${retry?`, Retry-After ${retry}`:''}). Sinkronisasi dihentikan; periksa izin akses.`;c.lastSync=new Date().toISOString();await saveDb(db);throw Object.assign(Error(c.message),{status:403,alreadySaved:true});}
@@ -251,15 +282,73 @@ async function createAdminComic(db,b){
   }catch(error){return {item,message:`Komik tersimpan, tetapi konektor berhenti: ${error.message}`,syncResult:null};}
 }
 
+const commentViewer=session=>session?{id:session.userId||session.username,name:session.username,role:session.role}:null;
+// Rute komentar (PRD "Fitur Komentar"). Data hanya menyentuh comments.db; katalog tidak pernah di-join.
+async function commentRoute(req,res,url,session,db){
+  const method=req.method,pathname=url.pathname,viewer=commentViewer(session);
+  try{
+    if(pathname==='/api/comments'&&method==='GET'){
+      const targetId=String(url.searchParams.get('targetId')||'').trim();
+      if(!targetId)return json(res,400,{error:'Parameter targetId wajib diisi.'});
+      const sort=String(url.searchParams.get('sort')||'newest');
+      if(!['newest','oldest','popular'].includes(sort))return json(res,400,{error:'Urutan komentar tidak dikenal.'});
+      return json(res,200,commentStore.listMain({targetId,sort,cursor:url.searchParams.get('cursor'),limit:url.searchParams.get('limit'),viewer}));
+    }
+    if(pathname==='/api/comments'&&method==='POST'){
+      if(!viewer)return json(res,401,{error:'Silakan masuk terlebih dahulu.'});
+      const b=await body(req),targetId=String(b.targetId||'').trim(),targetType=String(b.targetType||'series');
+      if(targetType!=='series')return json(res,400,{error:'Komentar hanya tersedia untuk judul seri.'});
+      if(!db.comics.some(c=>c.id===targetId))return json(res,404,{error:'Judul tidak ditemukan.'});
+      return json(res,201,{comment:commentStore.create({targetType,targetId,parentId:b.parentId?String(b.parentId):null,body:b.body,isSpoiler:Boolean(b.isSpoiler),user:viewer})});
+    }
+    let m=pathname.match(/^\/api\/comments\/([^/]+)\/replies$/);
+    if(m&&method==='GET')return json(res,200,commentStore.listReplies({parentId:decodeURIComponent(m[1]),cursor:url.searchParams.get('cursor'),limit:url.searchParams.get('limit'),viewer}));
+    m=pathname.match(/^\/api\/comments\/([^/]+)\/like$/);
+    if(m&&(method==='POST'||method==='DELETE')){
+      if(!viewer)return json(res,401,{error:'Silakan masuk terlebih dahulu.'});
+      return json(res,200,commentStore.setLike(decodeURIComponent(m[1]),viewer,method==='POST'));
+    }
+    m=pathname.match(/^\/api\/comments\/([^/]+)\/report$/);
+    if(m&&method==='POST'){
+      if(!viewer)return json(res,401,{error:'Silakan masuk terlebih dahulu.'});
+      const b=await body(req);
+      return json(res,200,commentStore.report(decodeURIComponent(m[1]),viewer,String(b.reason||'')));
+    }
+    m=pathname.match(/^\/api\/comments\/([^/]+)$/);
+    if(m&&method==='DELETE'){
+      if(!viewer)return json(res,401,{error:'Silakan masuk terlebih dahulu.'});
+      return json(res,200,commentStore.softDelete(decodeURIComponent(m[1]),viewer));
+    }
+    if(m&&method==='PATCH'){
+      if(!viewer)return json(res,401,{error:'Silakan masuk terlebih dahulu.'});
+      const b=await body(req);
+      return json(res,200,{comment:commentStore.edit(decodeURIComponent(m[1]),viewer,b.body)});
+    }
+    if(pathname==='/api/admin/comment-reports'&&method==='GET')return json(res,200,{reports:commentStore.listReports()});
+    if(pathname.startsWith('/api/admin/comment-reports/')&&method==='POST'){
+      const b=await body(req);
+      return json(res,200,commentStore.resolveReports(decodeURIComponent(pathname.slice('/api/admin/comment-reports/'.length)),String(b.action||'')));
+    }
+  }catch(error){
+    const status=error.status||500;
+    if(status>=500)console.error('[comments]',error.message);
+    return json(res,status,{error:error.message||'Terjadi kesalahan pada komentar.'});
+  }
+  return json(res,404,{error:'Rute komentar tidak ditemukan.'});
+}
 async function api(req,res,url){const db=await dbPromise;const method=req.method;
-  if(url.pathname==='/api/auth/register'&&method==='POST'){const b=await body(req),username=String(b.username||'').trim().toLowerCase(),password=String(b.password||'');if(!/^[a-z0-9_.-]{3,32}$/.test(username)||password.length<8)return json(res,400,{error:'Nama pengguna harus 3–32 karakter; kata sandi minimal 8 karakter.'});if(username===ADMIN_USER.toLowerCase()||db.users?.some(u=>u.username===username))return json(res,409,{error:'Nama pengguna sudah digunakan.'});db.users||=[];db.users.push({id:crypto.randomUUID(),username,passwordHash:await passwordRecord(password),role:'user',createdAt:new Date().toISOString()});await saveDb(db);return login(req,res,{username,password,role:'user'},db);}
   if(url.pathname==='/api/auth/login'&&method==='POST'){const b=await body(req);return login(req,res,b,db);}
-  if(url.pathname==='/api/auth/logout'&&method==='POST'){const session=cookieSession(req);if(session)sessions.delete(session.id);res.setHeader('set-cookie','lembar_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return json(res,200,{ok:true});}
-  if(url.pathname==='/api/auth/me'&&method==='GET'){const session=cookieSession(req);return json(res,200,session?{authenticated:true,role:session.role,username:session.username}:{authenticated:false});}
+  if(url.pathname==='/api/auth/logout'&&method==='POST'){const session=cookieSession(req);if(session){sessions.delete(session.id);if(session.beToken)authBackend('/auth/logout',{method:'POST',token:session.beToken}).catch(()=>{});}clearSessionCookie(res);return json(res,200,{ok:true});}
+  if(url.pathname==='/api/auth/me'&&method==='GET'){const session=cookieSession(req);const base={enabled:AUTH_CONFIG.enabled,social:AUTH_CONFIG.socialProviders};if(!session)return json(res,200,{authenticated:false,...base});if(session.reader){if(!AUTH_CONFIG.enabled)return json(res,200,{authenticated:false,...base});try{const out=await authBackend('/me',{token:session.beToken});if(out.ok){session.user=out.data;session.username=out.data.username;session.role=out.data.role||'user';return json(res,200,{authenticated:true,role:session.role,username:out.data.username,user:out.data,...base});}}catch{}sessions.delete(session.id);clearSessionCookie(res);return json(res,200,{authenticated:false,...base});}if(session.role==='admin')return json(res,200,{authenticated:true,role:'admin',username:session.username,...base});return json(res,200,{authenticated:false,...base});}
+  if(url.pathname.startsWith('/api/auth/social/')&&url.pathname.endsWith('/start')&&method==='GET'){if(!AUTH_CONFIG.enabled)return json(res,503,{error:'Fitur login belum aktif di server ini.'});const provider=url.pathname.split('/')[4];if(!AUTH_CONFIG.socialProviders.includes(provider))return json(res,404,{error:'Penyedia login tidak dikenal.'});const returnTo=relativeReturn(url.searchParams.get('return_to'));res.writeHead(302,{location:`${AUTH_CONFIG.backendUrl}/auth/${provider}/start?return_to=${encodeURIComponent(returnTo)}`});return res.end();}
+  if(url.pathname==='/api/auth/callback'&&method==='GET'){const handoff=url.searchParams.get('handoff'),error=url.searchParams.get('error'),returnTo=relativeReturn(url.searchParams.get('return_to'));if(handoff&&AUTH_CONFIG.enabled){try{const out=await authBackend('/auth/handoff',{method:'POST',payload:{code:handoff}});if(out.ok){const id=createReaderSession(out.data.user,out.data.session_token);setSession(res,id,{reader:true});res.writeHead(302,{location:returnTo});return res.end();}}catch{}}const kind=error||(handoff?'failed':'cancelled');res.writeHead(302,{location:authModalUrl(returnTo,kind)});return res.end();}
   const session=cookieSession(req);
   if(url.pathname.startsWith('/api/admin')&&session?.role!=='admin')return json(res,401,{error:'Silakan masuk menggunakan akun admin.'});
   if(url.pathname.startsWith('/api/admin/scan'))return scanHandler(req,res,url);
+  if(url.pathname.startsWith('/api/admin/subscriptions'))return subscriptionHandler(req,res,url);
   if(url.pathname==='/api/catalog'&&method==='GET')return json(res,200,publicCatalog(db));
+  if(url.pathname==='/api/search'&&method==='GET')return json(res,200,{results:searchComics(db.comics,url.searchParams.get('q'),url.searchParams.get('limit'))});
+  if(url.pathname==='/api/comments'||url.pathname.startsWith('/api/comments/')||url.pathname.startsWith('/api/admin/comment-reports'))return commentRoute(req,res,url,session,db);
   {const m=method==='GET'&&url.pathname.match(/^\/api\/comics\/([^/]+)\/chapters\/([^/]+)\/pages$/);if(m){let comicId,chapterId;try{comicId=decodeURIComponent(m[1]);chapterId=decodeURIComponent(m[2]);}catch{return json(res,400,{error:'Parameter tidak valid.'});}const comic=db.comics.find(c=>c.id===comicId),chapter=comic?.chapters?.find(c=>c.id===chapterId);if(!chapter)return json(res,404,{error:'Chapter tidak ditemukan.'});return json(res,200,detailForReader(comic,chapter));}}
   if(url.pathname==='/api/connectors'&&method==='GET')return json(res,200,{connectors:db.connectors.map(({id,name,method,enabled,state,message,lastSync,intervalMinutes})=>({id,name,method,enabled,state,message,lastSync,intervalMinutes}))});
   if(url.pathname==='/api/admin'&&method==='GET')return json(res,200,{connectors:db.connectors,announcements:db.announcements,ads:db.ads,settings:db.settings,comics:db.comics.map(adminComic)});
@@ -312,7 +401,7 @@ async function api(req,res,url){const db=await dbPromise;const method=req.method
   if(url.pathname==='/api/admin/settings'&&method==='PUT'){const b=await body(req);db.settings={...db.settings,adProvider:String(b.adProvider||'').slice(0,100),adUnit:String(b.adUnit||'').slice(0,180),scheduleEnabled:Boolean(b.scheduleEnabled)};await saveDb(db);return json(res,200,db.settings);}
   if(url.pathname==='/api/admin/announcements'&&method==='POST'){const b=await body(req);if(!b.title?.trim())return json(res,400,{error:'Judul wajib diisi.'});db.announcements.unshift({title:String(b.title).slice(0,120),body:String(b.body||'').slice(0,500),date:new Intl.DateTimeFormat('id-ID',{dateStyle:'long'}).format(new Date())});await saveDb(db);return json(res,201,db.announcements[0]);}
   if(url.pathname==='/api/admin/ads'&&method==='PATCH'){const b=await body(req);const ad=db.ads.find(x=>x.id===b.id);if(!ad)return json(res,404,{error:'Slot tidak ditemukan.'});ad.enabled=Boolean(b.enabled);await saveDb(db);return json(res,200,ad);}
-  if(url.pathname==='/api/health')return json(res,200,{ok:true,app:'Lembar'});
+  if(url.pathname==='/api/health')return json(res,200,{ok:true,app:'Akuma'});
   return json(res,404,{error:'Endpoint tidak ditemukan.'});
 }
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.pdf':'application/pdf'};
@@ -324,7 +413,7 @@ const server=http.createServer(async(req,res)=>{try{
   else{const publicPath=pathname==='/'?'/index.html':pathname;file=path.resolve(ROOT,'public',`.${publicPath}`);if(!file.startsWith(path.resolve(ROOT,'public')+path.sep))return json(res,403,{error:'Tidak diizinkan.'});}
   const data=await fs.readFile(file),type=mime[path.extname(file)]||'application/octet-stream',headers={'content-type':type,'x-content-type-options':'nosniff','cache-control':norm.isDraft?'private, no-store':norm.isMedia?'public, max-age=86400':'no-cache'};if(type==='application/pdf'){headers['accept-ranges']='bytes';headers['content-disposition']='inline';const range=req.headers.range;if(range){const match=range.match(/^bytes=(\d*)-(\d*)$/);if(!match){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null){const suffix=end;start=Math.max(0,data.length-suffix);end=data.length-1;}else if(end===null)end=data.length-1;if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||start>=data.length){res.writeHead(416,{'content-range':`bytes */${data.length}`});return res.end();}end=Math.min(end,data.length-1);headers['content-range']=`bytes ${start}-${end}/${data.length}`;headers['content-length']=String(end-start+1);res.writeHead(206,headers);return res.end(req.method==='HEAD'?undefined:data.subarray(start,end+1));}}headers['content-length']=String(data.length);res.writeHead(200,headers);res.end(req.method==='HEAD'?undefined:data);
 }catch(e){if(!res.headersSent)json(res,e.code==='ENOENT'?404:500,{error:e.code==='ENOENT'?'File tidak ditemukan.':e.message||'Terjadi kesalahan server.'});}});
-server.listen(PORT,HOST,()=>{console.log(`Lembar siap di http://${HOST}:${PORT}`);if(process.env.ADMIN_PASSWORD)console.log(`Login admin: ${ADMIN_USER} (kata sandi dikonfigurasi melalui environment)`);else console.log(`Login admin sementara: ${ADMIN_USER} / ${ADMIN_PASSWORD} (atur ADMIN_PASSWORD untuk kata sandi tetap)`);});
+server.listen(PORT,HOST,()=>{console.log(`Akuma siap di http://${HOST}:${PORT}`);if(process.env.ADMIN_PASSWORD)console.log(`Login admin: ${ADMIN_USER} (kata sandi dikonfigurasi melalui environment)`);else console.log(`Login admin sementara: ${ADMIN_USER} / ${ADMIN_PASSWORD} (atur ADMIN_PASSWORD untuk kata sandi tetap)`);});
 
 // Scheduler only processes explicitly enabled public metadata connectors.
 setInterval(async()=>{try{const db=await dbPromise;if(!db.settings.scheduleEnabled)return;for(const c of db.connectors.filter(x=>['demo-source','public-feed','kiryuu'].includes(x.id)&&x.enabled)){const due=!c.lastSync||Date.now()-Date.parse(c.lastSync)>=c.intervalMinutes*60000;if(due)await syncConnector(c.id);}}catch(e){console.error('[scheduler]',e.message);}},60_000).unref();

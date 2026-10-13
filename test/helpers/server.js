@@ -6,18 +6,19 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 
-async function startServer({env = {}, db} = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lembar-srv-'));
+async function startServer({env = {}, db, auth} = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'akuma-srv-'));
   if (db) fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify(db));
   const port = 3200 + Math.floor(Math.random() * 600);
+  const authEnv = auth ? {AUTH_ENABLED: 'true', AUTH_BACKEND_URL: auth.url, AUTH_BACKEND_TIMEOUT_MS: '4000'} : {};
   const child = spawn(process.execPath, [path.join(__dirname, '..', '..', 'server.js')], {
-    env: {...process.env, LEMBAR_DATA_DIR: dir, PORT: String(port), HOST: '127.0.0.1', ADMIN_USER: 'admin', ADMIN_PASSWORD: 'pw-uji-123', LEMBAR_SKIP_ENV: '1', ...env}, stdio: ['ignore', 'pipe', 'pipe']
+    env: {...process.env, AKUMA_DATA_DIR: dir, PORT: String(port), HOST: '127.0.0.1', ADMIN_USER: 'admin', ADMIN_PASSWORD: 'pw-uji-123', AKUMA_SKIP_ENV: '1', ...authEnv, ...env}, stdio: ['ignore', 'pipe', 'pipe']
   });
   let log = '';
   child.stdout.on('data', d => { log += d; }); child.stderr.on('data', d => { log += d; });
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('server tidak start: ' + log)), 8000);
-    child.stdout.on('data', () => { if (log.includes('Lembar siap')) { clearTimeout(t); resolve(); } });
+    child.stdout.on('data', () => { if (log.includes('Akuma siap')) { clearTimeout(t); resolve(); } });
     child.on('exit', code => { clearTimeout(t); reject(new Error('server keluar: ' + code + ' ' + log)); });
   });
   const base = `http://127.0.0.1:${port}`;
@@ -32,6 +33,7 @@ async function startServer({env = {}, db} = {}) {
     dir, base, port, log: () => log,
     request,
     async login() { const res = await fetch(base + '/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({username: 'admin', password: 'pw-uji-123', role: 'admin'})}); cookie = res.headers.get('set-cookie').split(';')[0]; return cookie; },
+    async readerLogin(username, password) { const res = await fetch(base + '/api/auth/login', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({username, password, role: 'user'})}); const sc = res.headers.get('set-cookie'); return {status: res.status, cookie: sc ? sc.split(';')[0] : null, json: await res.json().catch(() => null)}; },
     logout() { cookie = ''; },
     rawGet: (p, headers = {}) => new Promise((resolve, reject) => { http.get({host: '127.0.0.1', port, path: p, headers}, res => { const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks)})); }).on('error', reject); }),
     stop: () => new Promise(r => { child.once('exit', () => { fs.rmSync(dir, {recursive: true, force: true}); r(); }); child.kill(); })

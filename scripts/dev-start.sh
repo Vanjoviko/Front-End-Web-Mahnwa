@@ -6,7 +6,7 @@
 #   BE_DIR=/path/ke/Back-End-Web-Mahnwa scripts/dev-start.sh
 #
 # Variabel opsional: BE_DIR, FE_PORT(3000) WORKER_PORT(8000) FIXTURE_PORT(9100), WORKER_TOKEN(dev-token),
-#   ADMIN_USER(admin) ADMIN_PASSWORD(admin-dev), FE_DATA_DIR(<FE>/.dev-data), LOG_DIR(/tmp/lembar-dev),
+#   ADMIN_USER(admin) ADMIN_PASSWORD(admin-dev), FE_DATA_DIR(<FE>/.dev-data), LOG_DIR(/tmp/akuma-dev),
 #   HOST_MIN_DELAY_MS(0), SKIP_INSTALL=1 (jangan membuat venv / pip install).
 set -euo pipefail
 
@@ -22,7 +22,7 @@ command -v curl >/dev/null || { echo "curl diperlukan" >&2; exit 1; }
 
 FE_PORT="${FE_PORT:-3000}"; WORKER_PORT="${WORKER_PORT:-8000}"; FIXTURE_PORT="${FIXTURE_PORT:-9100}"
 TOKEN="${WORKER_TOKEN:-dev-token}"
-LOG_DIR="${LOG_DIR:-/tmp/lembar-dev}"; mkdir -p "$LOG_DIR"
+LOG_DIR="${LOG_DIR:-/tmp/akuma-dev}"; mkdir -p "$LOG_DIR"
 FE_DATA_DIR="${FE_DATA_DIR:-$FE_DIR/.dev-data}"; mkdir -p "$FE_DATA_DIR"
 
 # Interpreter BE: pakai .venv lokal bila ada, jika tidak fallback ke python3 sistem
@@ -75,7 +75,7 @@ PIDS+=($!)
 wait_http "http://127.0.0.1:$WORKER_PORT/health" "worker"
 
 echo ">> front-end :$FE_PORT (data: $FE_DATA_DIR)"
-( cd "$FE_DIR" && LEMBAR_DATA_DIR="$FE_DATA_DIR" PORT="$FE_PORT" HOST=127.0.0.1 \
+( cd "$FE_DIR" && AKUMA_DATA_DIR="$FE_DATA_DIR" PORT="$FE_PORT" HOST=127.0.0.1 \
     ADMIN_USER="${ADMIN_USER:-admin}" ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-dev}" \
     SCAN_WORKER_URL="http://127.0.0.1:$WORKER_PORT" SCAN_WORKER_TOKEN="$TOKEN" SCAN_DEV_MODE=true \
     SCAN_MIN_FREE_BYTES=1000000 exec node server.js ) >"$LOG_DIR/fe.log" 2>&1 &
